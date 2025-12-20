@@ -5,8 +5,9 @@ mod state;
 
 use crate::config::Settings;
 use crate::render::d2d::D2DRenderer;
-use crate::image::decoder;
-use crate::image::archive::ArchiveLoader;
+use crate::image::get_image_source;
+use crate::image::cache::create_shared_cache;
+use crate::image::loader::{AsyncLoader, LoaderRequest, LoaderResponse};
 use crate::state::{AppState, BindingDirection};
 use std::sync::Arc;
 use windows::Win32::Foundation::HWND;
@@ -19,8 +20,8 @@ use winit::{
     keyboard::{PhysicalKey, KeyCode, ModifiersState},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use walkdir::WalkDir;
 use winit::platform::windows::WindowBuilderExtWindows;
+use tokio::runtime::Runtime;
 
 struct ViewState {
     zoom_level: f32,
@@ -74,64 +75,14 @@ impl ViewState {
     }
 }
 
-enum ImageSource {
-    Files(Vec<String>),
-    Archive(ArchiveLoader),
-}
-
-impl ImageSource {
-    fn len(&self) -> usize {
-        match self {
-            Self::Files(f) => f.len(),
-            Self::Archive(a) => a.get_file_names().len(),
-        }
-    }
-
-    fn load_image(&mut self, index: usize) -> Result<decoder::DecodedImage, Box<dyn std::error::Error>> {
-        match self {
-            Self::Files(f) => {
-                let decoded = decoder::decode_image(&f[index])?;
-                Ok(decoded)
-            }
-            Self::Archive(a) => {
-                a.load_image(index)
-            }
-        }
-    }
-}
-
-fn get_image_source(path: &str) -> Option<ImageSource> {
-    let path_buf = std::path::Path::new(path);
-    if path_buf.is_dir() {
-        let mut files: Vec<String> = Vec::new();
-        let supported = ["jpg", "jpeg", "png", "webp", "bmp", "jp2"];
-        for entry in WalkDir::new(path).max_depth(1).into_iter().filter_map(|e| e.ok()) {
-            if let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) {
-                if supported.contains(&ext.to_lowercase().as_str()) {
-                    files.push(entry.path().to_string_lossy().to_string());
-                }
-            }
-        }
-        files.sort_by(|a, b| natord::compare(a, b));
-        return Some(ImageSource::Files(files));
-    } else if let Some(ext) = path_buf.extension().and_then(|s| s.to_str()) {
-        let ext_lower = ext.to_lowercase();
-        if ext_lower == "zip" || ext_lower == "7z" {
-            if let Ok(loader) = ArchiveLoader::open(path) {
-                return Some(ImageSource::Archive(loader));
-            }
-        } else {
-            // 単一ファイル
-            return Some(ImageSource::Files(vec![path.to_string()]));
-        }
-    }
-    None
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = "config.json";
     let settings = Settings::load_or_default(config_path);
     if !std::path::Path::new(config_path).exists() { let _ = settings.save(config_path); }
+
+    // Tokio Runtime
+    let rt = Runtime::new()?;
+    let _guard = rt.enter();
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -158,20 +109,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let renderer = D2DRenderer::new(hwnd)?;
     let mut view_state = ViewState::new();
     let mut app_state = AppState::new();
+    let mut current_path_key = String::new();
 
     app_state.is_spread_view = settings.is_spread_view;
     app_state.binding_direction = if settings.binding_direction == "right" { BindingDirection::Right } else { BindingDirection::Left };
     app_state.spread_view_first_page_single = settings.spread_view_first_page_single;
 
-    let args: Vec<String> = std::env::args().collect();
-    let mut image_source = if args.len() > 1 {
-        get_image_source(&args[1])
-    } else {
-        None
-    };
+    // Cache & Loader
+    let cpu_cache = create_shared_cache(100);
+    let loader = AsyncLoader::new(cpu_cache.clone());
 
-    if let Some(ref src) = image_source {
-        app_state.image_files = vec!["".to_string(); src.len()];
+    // 初期パスの読み込み
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        if let Some(src) = get_image_source(&args[1]) {
+            app_state.image_files = vec!["".to_string(); src.len()];
+            current_path_key = args[1].clone();
+            rt.block_on(loader.send_request(LoaderRequest::SetSource { 
+                source: src, 
+                path_key: current_path_key.clone() 
+            }));
+            request_pages_with_prefetch(&app_state, &loader, &rt);
+        }
     }
 
     let mut current_bitmaps: Vec<(usize, ID2D1Bitmap1)> = Vec::new();
@@ -184,21 +143,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 WindowEvent::Resized(physical_size) => {
                     let _ = renderer.resize(physical_size.width, physical_size.height);
                 }
-                WindowEvent::HoveredFile(path) => {
-                    println!("Hovering over file: {}", path.to_string_lossy());
-                }
                 WindowEvent::DroppedFile(path) => {
-                    let path_str = path.to_string_lossy();
+                    let path_str = path.to_string_lossy().to_string();
                     println!("Dropped file: {}", path_str);
                     if let Some(new_source) = get_image_source(&path_str) {
                         println!("Source created: {} files/entries", new_source.len());
                         app_state.image_files = vec!["".to_string(); new_source.len()];
                         app_state.current_page_index = 0;
-                        image_source = Some(new_source);
                         current_bitmaps.clear();
+                        current_path_key = path_str.clone();
+                        
+                        rt.block_on(loader.send_request(LoaderRequest::SetSource { 
+                            source: new_source, 
+                            path_key: path_str 
+                        }));
+                        request_pages_with_prefetch(&app_state, &loader, &rt);
                         window.request_redraw();
-                    } else {
-                        println!("Failed to create source from: {}", path_str);
                     }
                 }
                 WindowEvent::ModifiersChanged(new_modifiers) => {
@@ -208,24 +168,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match code {
                         KeyCode::ArrowRight | KeyCode::ArrowLeft => {
                             let direction = if code == KeyCode::ArrowRight { 1 } else { -1 };
-                            
                             if modifiers.shift_key() {
-                                // フォルダ移動 (Python版 _navigate_folder 相当)
-                                // 本来はフォルダ境界を探すべきだが、現在は簡易的に大きくスキップ
                                 app_state.navigate(direction * 10);
                             } else if modifiers.control_key() {
-                                // 単一ページ移動
                                 let new_idx = (app_state.current_page_index as isize + direction as isize).clamp(0, (app_state.image_files.len() as isize - 1).max(0)) as usize;
                                 app_state.current_page_index = new_idx;
                             } else {
-                                // 通常移動
                                 app_state.navigate(direction);
                             }
-                            current_bitmaps.clear();
                             view_state.reset();
+                            request_pages_with_prefetch(&app_state, &loader, &rt);
                         },
                         KeyCode::KeyB => {
-                            // 表示モードのサイクル切替: Single -> Spread RTL -> Spread LTR -> Single
                             if !app_state.is_spread_view {
                                 app_state.is_spread_view = true;
                                 app_state.binding_direction = BindingDirection::Right;
@@ -234,8 +188,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else {
                                 app_state.is_spread_view = false;
                             }
-                            current_bitmaps.clear();
                             view_state.reset();
+                            request_pages_with_prefetch(&app_state, &loader, &rt);
                         },
                         KeyCode::NumpadMultiply => {
                             view_state.reset();
@@ -267,13 +221,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         MouseButton::Right => {
                             if state == ElementState::Pressed {
-                                // 拡大ルーペ開始
                                 view_state.is_loupe = true;
                                 view_state.loupe_base_zoom = view_state.zoom_level;
                                 view_state.loupe_base_pan = view_state.pan_offset;
                                 view_state.set_zoom(view_state.zoom_level * 2.0, view_state.cursor_pos);
                             } else {
-                                // 拡大ルーペ終了
                                 if view_state.is_loupe {
                                     view_state.zoom_level = view_state.loupe_base_zoom;
                                     view_state.pan_offset = view_state.loupe_base_pan;
@@ -286,7 +238,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     window.request_redraw();
                 }
                 WindowEvent::MouseWheel { delta, .. } => {
-                    // Python版準拠: ホイールはページ送り
                     let scroll = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y,
                         MouseScrollDelta::PixelDelta(pos) => (pos.y / 120.0) as f32,
@@ -295,85 +246,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if scroll.abs() > 0.1 {
                         let direction = if scroll > 0.0 { -1 } else { 1 };
                         app_state.navigate(direction);
-                        current_bitmaps.clear();
                         view_state.reset();
+                        request_pages_with_prefetch(&app_state, &loader, &rt);
                         window.request_redraw();
                     }
                 }
                 WindowEvent::RedrawRequested => {
-                    if let Some(ref mut source) = image_source {
-                        let indices = app_state.get_page_indices_to_display();
-                        
+                    // 非同期レスポンスのチェック
+                    while let Some(res) = loader.try_recv_response() {
+                        match res {
+                            LoaderResponse::Loaded { index, .. } => {
+                                if app_state.get_page_indices_to_display().contains(&index) {
+                                    window.request_redraw();
+                                }
+                            }
+                        }
+                    }
+
+                    let indices = app_state.get_page_indices_to_display();
+                    
+                    // GPU キャッシュの更新
+                    {
+                        let mut cache = cpu_cache.lock().unwrap();
                         for &idx in &indices {
                             if !current_bitmaps.iter().any(|(i, _)| *i == idx) {
-                                if let Ok(decoded) = source.load_image(idx) {
+                                let key = format!("{}::{}", current_path_key, idx);
+                                if let Some(decoded) = cache.get(&key) {
                                     if let Ok(bitmap) = renderer.create_bitmap(decoded.width, decoded.height, &decoded.data) {
                                         current_bitmaps.push((idx, bitmap));
                                     }
                                 }
                             }
                         }
+                    }
 
-                        renderer.begin_draw();
-                        
-                        let mut bitmaps_to_draw = Vec::new();
-                        for &idx in &indices {
-                            if let Some((_, bmp)) = current_bitmaps.iter().find(|(i, _)| *i == idx) {
-                                bitmaps_to_draw.push(bmp);
-                            }
+                    // 描画
+                    renderer.begin_draw();
+                    
+                    let mut bitmaps_to_draw = Vec::new();
+                    for &idx in &indices {
+                        if let Some((_, bmp)) = current_bitmaps.iter().find(|(i, _)| *i == idx) {
+                            bitmaps_to_draw.push(bmp);
                         }
+                    }
 
-                        if !bitmaps_to_draw.is_empty() {
-                            unsafe {
-                                let window_size = window.inner_size();
-                                let win_w = window_size.width as f32;
-                                let win_h = window_size.height as f32;
+                    if !bitmaps_to_draw.is_empty() {
+                        unsafe {
+                            let window_size = window.inner_size();
+                            let win_w = window_size.width as f32;
+                            let win_h = window_size.height as f32;
 
-                                let mut total_content_w = 0.0;
-                                let mut max_content_h = 0.0;
+                            let mut total_content_w = 0.0;
+                            let mut max_content_h = 0.0;
+                            for bmp in &bitmaps_to_draw {
+                                let size = bmp.GetSize();
+                                total_content_w += size.width;
+                                if size.height > max_content_h { max_content_h = size.height; }
+                            }
+
+                            if total_content_w > 0.0 && max_content_h > 0.0 {
+                                let scale_fit = (win_w / total_content_w).min(win_h / max_content_h);
+                                let total_scale = scale_fit * view_state.zoom_level;
+
+                                let draw_total_w = total_content_w * total_scale;
+                                let draw_max_h = max_content_h * total_scale;
+
+                                view_state.clamp_pan_offset((win_w, win_h), (draw_total_w, draw_max_h));
+
+                                let base_x = (win_w - draw_total_w) / 2.0 + view_state.pan_offset.0;
+                                let base_y = (win_h - draw_max_h) / 2.0 + view_state.pan_offset.1;
+
+                                let mut current_x = base_x;
                                 for bmp in &bitmaps_to_draw {
                                     let size = bmp.GetSize();
-                                    total_content_w += size.width;
-                                    if size.height > max_content_h { max_content_h = size.height; }
-                                }
+                                    let w = size.width * total_scale;
+                                    let h = size.height * total_scale;
+                                    let y = base_y + (draw_max_h - h) / 2.0;
 
-                                if total_content_w > 0.0 && max_content_h > 0.0 {
-                                    let scale_fit = (win_w / total_content_w).min(win_h / max_content_h);
-                                    let total_scale = scale_fit * view_state.zoom_level;
-
-                                    let draw_total_w = total_content_w * total_scale;
-                                    let draw_max_h = max_content_h * total_scale;
-
-                                    view_state.clamp_pan_offset((win_w, win_h), (draw_total_w, draw_max_h));
-
-                                    let base_x = (win_w - draw_total_w) / 2.0 + view_state.pan_offset.0;
-                                    let base_y = (win_h - draw_max_h) / 2.0 + view_state.pan_offset.1;
-
-                                    let mut current_x = base_x;
-                                    for bmp in &bitmaps_to_draw {
-                                        let size = bmp.GetSize();
-                                        let w = size.width * total_scale;
-                                        let h = size.height * total_scale;
-                                        let y = base_y + (draw_max_h - h) / 2.0;
-
-                                        let dest_rect = D2D_RECT_F {
-                                            left: current_x,
-                                            top: y,
-                                            right: current_x + w,
-                                            bottom: y + h,
-                                        };
-                                        renderer.draw_bitmap(bmp, &dest_rect);
-                                        current_x += w;
-                                    }
+                                    let dest_rect = D2D_RECT_F {
+                                        left: current_x,
+                                        top: y,
+                                        right: current_x + w,
+                                        bottom: y + h,
+                                    };
+                                    renderer.draw_bitmap(bmp, &dest_rect);
+                                    current_x += w;
                                 }
                             }
                         }
-
-                        let _ = renderer.end_draw();
-                    } else {
-                        renderer.begin_draw();
-                        let _ = renderer.end_draw();
                     }
+
+                    let _ = renderer.end_draw();
                 }
                 _ => (),
             },
@@ -385,4 +348,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     Ok(())
+}
+
+fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &Runtime) {
+    let display_indices = app_state.get_page_indices_to_display();
+    let max_idx = app_state.image_files.len() as isize - 1;
+    if max_idx < 0 { return; }
+
+    // 1. 表示対象 (Priority 0)
+    for &idx in &display_indices {
+        rt.block_on(loader.send_request(LoaderRequest::Load { index: idx, priority: 0 }));
+    }
+
+    // 2. 先読み (Priority 1)
+    let prefetch_range = 5;
+    let mut prefetch_indices = Vec::new();
+    for &idx in &display_indices {
+        for i in 1..=prefetch_range {
+            let next = idx as isize + i;
+            let prev = idx as isize - i;
+            if next <= max_idx { prefetch_indices.push(next as usize); }
+            if prev >= 0 { prefetch_indices.push(prev as usize); }
+        }
+    }
+    
+    // 重複と表示対象を除外して送信
+    prefetch_indices.sort();
+    prefetch_indices.dedup();
+    for idx in prefetch_indices {
+        if !display_indices.contains(&idx) {
+            rt.block_on(loader.send_request(LoaderRequest::Load { index: idx, priority: 1 }));
+        }
+    }
 }
