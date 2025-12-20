@@ -27,6 +27,14 @@ impl ImageCache {
     pub fn clear(&mut self) {
         self.cache.clear();
     }
+
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    pub fn get_keys(&self) -> Vec<String> {
+        self.cache.iter().map(|(k, _)| k.clone()).collect()
+    }
 }
 
 pub type SharedImageCache = Arc<Mutex<ImageCache>>;

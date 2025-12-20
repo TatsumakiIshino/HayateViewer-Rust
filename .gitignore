@@ -1,1 +1,6 @@
 /target
+config.json
+AGENTS.md
+*.log
+run_log.txt
+build_output.txt

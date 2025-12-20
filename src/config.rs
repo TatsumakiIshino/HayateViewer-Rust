@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub rendering_backend: String,
     pub is_spread_view: bool,

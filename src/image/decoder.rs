@@ -21,6 +21,11 @@ pub fn decode_image<P: AsRef<Path>>(path: P) -> Result<DecodedImage, Box<dyn std
 }
 
 pub fn _decode_image_from_memory(data: &[u8]) -> Result<DecodedImage, Box<dyn std::error::Error>> {
+    println!("[Decoder] Image memory size: {} bytes", data.len());
+    if data.len() >= 8 {
+        println!("[Decoder] Header: {:02X?}", &data[0..8]);
+    }
+
     if data.len() > 8 && &data[0..8] == &[0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20] {
         return decode_jp2(data);
     }
@@ -31,33 +36,40 @@ pub fn _decode_image_from_memory(data: &[u8]) -> Result<DecodedImage, Box<dyn st
 
 fn decode_jp2(data: &[u8]) -> Result<DecodedImage, Box<dyn std::error::Error>> {
     use hayro_jpeg2000::{decode, DecodeSettings, ColorSpace};
+    println!("[Decoder] Starting hayro-jpeg2000 decode...");
     
     let img = decode(data, &DecodeSettings::default())
         .map_err(|e| format!("JP2 decode error: {}", e))?;
     
     let width = img.width as u32;
     let height = img.height as u32;
+    println!("[Decoder] JP2 ColorSpace: {:?}, Data size: {}", img.color_space, img.data.len());
+    if img.data.len() >= 3 {
+        println!("[Decoder] First pixel: {:?}", &img.data[0..3]);
+    }
     
     let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
     let pixels = &img.data;
     
     match img.color_space {
         ColorSpace::RGB => {
-            for i in (0..pixels.len()).step_by(3) {
-                if i + 2 < pixels.len() {
-                    rgba_data.push(pixels[i]);
-                    rgba_data.push(pixels[i+1]);
-                    rgba_data.push(pixels[i+2]);
-                    rgba_data.push(255);
-                }
+            rgba_data.resize((width * height * 4) as usize, 255);
+            for (i, chunk) in pixels.chunks_exact(3).enumerate() {
+                let offset = i * 4;
+                // 一旦、標準的な RGB 順序に戻して挙動を確認
+                rgba_data[offset] = chunk[0];     // R
+                rgba_data[offset + 1] = chunk[1]; // G
+                rgba_data[offset + 2] = chunk[2]; // B
+                // alpha is already 255
             }
         }
         ColorSpace::Gray => {
-            for &p in pixels {
-                rgba_data.push(p);
-                rgba_data.push(p);
-                rgba_data.push(p);
-                rgba_data.push(255);
+            rgba_data.resize((width * height * 4) as usize, 255);
+            for (i, &p) in pixels.iter().enumerate() {
+                let offset = i * 4;
+                rgba_data[offset] = p;
+                rgba_data[offset + 1] = p;
+                rgba_data[offset + 2] = p;
             }
         }
         _ => {

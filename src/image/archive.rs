@@ -1,11 +1,14 @@
 use std::io::Read;
 use zip::ZipArchive;
-use sevenz_rust::{SevenZReader, Password};
+use sevenz_rust;
 use crate::image::decoder::{DecodedImage, _decode_image_from_memory};
 
 pub enum ArchiveInternal {
     Zip(ZipArchive<std::fs::File>),
-    SevenZ(std::path::PathBuf),
+    SevenZ {
+        temp_dir: std::path::PathBuf,
+        archive_path: std::path::PathBuf,
+    },
 }
 
 pub struct ArchiveLoader {
@@ -41,25 +44,34 @@ impl ArchiveLoader {
                 file_names,
             })
         } else if ext == "7z" {
-            let file = std::fs::File::open(path)?;
-            let len = file.metadata()?.len();
-            let mut reader = SevenZReader::new(file, len, Password::empty())?;
+            let temp_dir = std::env::temp_dir().join(format!("HayateViewer_Rust_{}", crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC).checksum(path.as_bytes())));
+            if !temp_dir.exists() {
+                std::fs::create_dir_all(&temp_dir)?;
+            }
             
-            reader.for_each_entries(|entry, _| {
-                if !entry.is_directory() {
-                    let name = entry.name();
-                    if let Some(ext) = std::path::Path::new(name).extension().and_then(|s| s.to_str()) {
+            println!("[Archive] Extracting 7z to temp: {} -> {:?}", path, temp_dir);
+            sevenz_rust::decompress_file(path, &temp_dir)?;
+
+            // 展開されたファイルをスキャンして file_names を構築
+            for entry in walkdir::WalkDir::new(&temp_dir) {
+                let entry = entry?;
+                if entry.file_type().is_file() {
+                    let rel_path = entry.path().strip_prefix(&temp_dir)?;
+                    let name = rel_path.to_string_lossy().to_string().replace("\\", "/");
+                    if let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) {
                         if supported.contains(&ext.to_lowercase().as_str()) {
-                            file_names.push(name.to_string());
+                            file_names.push(name);
                         }
                     }
                 }
-                Ok(true)
-            })?;
-            
+            }
+
             file_names.sort_by(|a, b| natord::compare(a, b));
             Ok(Self {
-                internal: ArchiveInternal::SevenZ(path_buf),
+                internal: ArchiveInternal::SevenZ {
+                    temp_dir,
+                    archive_path: path_buf,
+                },
                 file_names,
             })
         } else {
@@ -80,29 +92,24 @@ impl ArchiveLoader {
                 let mut file = archive.by_name(name)?;
                 file.read_to_end(&mut buffer)?;
             }
-            ArchiveInternal::SevenZ(ref path) => {
-                let file = std::fs::File::open(path)?;
-                let len = file.metadata()?.len();
-                let mut reader = SevenZReader::new(file, len, Password::empty())?;
-                
-                let mut found = false;
-                reader.for_each_entries(|entry, reader| {
-                    if entry.name() == name {
-                        reader.read_to_end(&mut buffer)?;
-                        found = true;
-                        Ok(false) // 停止
-                    } else {
-                        Ok(true) // 続行
-                    }
-                })?;
-                
-                if !found {
-                    return Err(format!("File not found in 7z: {}", name).into());
-                }
+            ArchiveInternal::SevenZ { ref temp_dir, .. } => {
+                let file_path = temp_dir.join(name.replace("/", "\\"));
+                println!("[Archive] Reading from temp: {:?}", file_path);
+                buffer = std::fs::read(&file_path)?;
+                println!("[Archive] Read completed: {}, size={}", name, buffer.len());
             }
         }
         
         let decoded = _decode_image_from_memory(&buffer)?;
         Ok(decoded)
+    }
+}
+
+impl Drop for ArchiveLoader {
+    fn drop(&mut self) {
+        if let ArchiveInternal::SevenZ { ref temp_dir, .. } = self.internal {
+            println!("[Archive] Cleaning up temp dir: {:?}", temp_dir);
+            let _ = std::fs::remove_dir_all(temp_dir);
+        }
     }
 }
