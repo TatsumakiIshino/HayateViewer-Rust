@@ -1,10 +1,13 @@
 mod config;
 mod render;
+mod image;
 
 use crate::config::Settings;
 use crate::render::d2d::D2DRenderer;
+use crate::image::decoder;
 use std::rc::Rc;
 use windows::Win32::Foundation::HWND;
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -42,6 +45,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // レンダラーの初期化
     let renderer = D2DRenderer::new(hwnd)?;
 
+    // 引数から画像を読み込む（暫定）
+    let args: Vec<String> = std::env::args().collect();
+    let mut current_bitmap = None;
+    if args.len() > 1 {
+        if let Ok(decoded) = decoder::decode_image(&args[1]) {
+            if let Ok(bitmap) = renderer.create_bitmap(decoded.width, decoded.height, &decoded.data) {
+                current_bitmap = Some(bitmap);
+            }
+        }
+    }
+
     event_loop.run(move |event, elwt| {
         match event {
             Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
@@ -51,7 +65,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WindowEvent::RedrawRequested => {
                     renderer.begin_draw();
-                    // 未来の実装: 画像の描画ロジック
+                    
+                    if let Some(ref bitmap) = current_bitmap {
+                        unsafe {
+                            let size = bitmap.GetSize();
+                            let window_size = window.inner_size();
+                            
+                            // 簡易的なアスペクト比維持スケーリング
+                            let scale = (window_size.width as f32 / size.width).min(window_size.height as f32 / size.height);
+                            let draw_width = size.width * scale;
+                            let draw_height = size.height * scale;
+                            let x = (window_size.width as f32 - draw_width) / 2.0;
+                            let y = (window_size.height as f32 - draw_height) / 2.0;
+
+                            let dest_rect = D2D_RECT_F {
+                                left: x,
+                                top: y,
+                                right: x + draw_width,
+                                bottom: y + draw_height,
+                            };
+                            renderer.draw_bitmap(bitmap, &dest_rect);
+                        }
+                    }
+
                     let _ = renderer.end_draw();
                 }
                 _ => (),

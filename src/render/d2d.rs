@@ -1,7 +1,8 @@
+use std::mem::ManuallyDrop;
 use windows::{
     core::*, Win32::Foundation::*, Win32::Graphics::Direct2D::Common::*, Win32::Graphics::Direct2D::*,
     Win32::Graphics::Direct3D::*, Win32::Graphics::Direct3D11::*, Win32::Graphics::Dxgi::Common::*,
-    Win32::Graphics::Dxgi::*, Win32::System::Com::*,
+    Win32::Graphics::Dxgi::*,
 };
 
 pub struct D2DRenderer {
@@ -78,10 +79,45 @@ impl D2DRenderer {
         }
     }
 
+    pub fn create_bitmap(&self, width: u32, height: u32, data: &[u8]) -> Result<ID2D1Bitmap1> {
+        unsafe {
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_R8G8B8A8_UNORM, // 修正
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                colorContext: ManuallyDrop::new(None),
+            };
+
+            self.context.CreateBitmap(
+                D2D_SIZE_U { width, height },
+                Some(data.as_ptr() as _),
+                width * 4,
+                &props,
+            )
+        }
+    }
+
+    pub fn draw_bitmap(&self, bitmap: &ID2D1Bitmap1, dest_rect: &D2D_RECT_F) {
+        unsafe {
+            self.context.DrawBitmap(
+                bitmap,
+                Some(dest_rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                None,
+                None,
+            );
+        }
+    }
+
     pub fn begin_draw(&self) {
         unsafe {
             self.context.BeginDraw();
-            self.context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+            self.context.Clear(Some(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }));
         }
     }
 
