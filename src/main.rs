@@ -49,18 +49,25 @@ impl ViewState {
         }
     }
 
-    fn set_zoom(&mut self, new_zoom: f32, center: (f32, f32)) {
+    fn set_zoom(&mut self, new_zoom: f32, center: (f32, f32), window_size: (f32, f32)) {
         let old_zoom = self.zoom_level;
-        self.zoom_level = new_zoom;
-        if self.zoom_level < 0.1 { self.zoom_level = 0.1; }
-        if self.zoom_level > 50.0 { self.zoom_level = 50.0; }
+        if (new_zoom - old_zoom).abs() < 1e-4 { return; }
 
+        self.zoom_level = new_zoom.clamp(0.1, 50.0);
         let actual_factor = self.zoom_level / old_zoom;
-        self.pan_offset.0 = center.0 - (center.0 - self.pan_offset.0) * actual_factor;
-        self.pan_offset.1 = center.1 - (center.1 - self.pan_offset.1) * actual_factor;
+
+        // 指定した座標 (center) がズーム前後で同じウィンドウ位置に留まるようにパンを調整
+        // P_win = (win_w / 2) + pan + x_rel * zoom
+        // pan_new = pan_old + (P_win - win_w / 2 - pan_old) * (1 - actual_factor)
+        self.pan_offset.0 += (center.0 - window_size.0 / 2.0 - self.pan_offset.0) * (1.0 - actual_factor);
+        self.pan_offset.1 += (center.1 - window_size.1 / 2.0 - self.pan_offset.1) * (1.0 - actual_factor);
     }
 
     fn clamp_pan_offset(&mut self, window_size: (f32, f32), content_size: (f32, f32)) {
+        if self.is_loupe {
+            // ルーペ中はマウス位置を保持するために制限を緩める
+            return;
+        }
         let max_pan_x = (content_size.0 - window_size.0).max(0.0) / 2.0;
         let max_pan_y = (content_size.1 - window_size.1).max(0.0) / 2.0;
 
@@ -321,7 +328,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 view_state.is_loupe = true;
                                 view_state.loupe_base_zoom = view_state.zoom_level;
                                 view_state.loupe_base_pan = view_state.pan_offset;
-                                view_state.set_zoom(view_state.zoom_level * 2.0, view_state.cursor_pos);
+
+                                let window_size = window.inner_size();
+                                let win_size = (window_size.width as f32, window_size.height as f32);
+                                view_state.set_zoom(view_state.zoom_level * 2.0, view_state.cursor_pos, win_size);
                             } else {
                                 if view_state.is_loupe {
                                     view_state.zoom_level = view_state.loupe_base_zoom;
