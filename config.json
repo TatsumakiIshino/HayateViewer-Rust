@@ -1,0 +1,29 @@
+{
+  "rendering_backend": "direct2d",
+  "is_spread_view": true,
+  "binding_direction": "left",
+  "spread_view_first_page_single": true,
+  "window_size": [
+    1280,
+    768
+  ],
+  "window_position": [
+    100,
+    100
+  ],
+  "window_geometry": [
+    100,
+    100,
+    1280,
+    768
+  ],
+  "parallel_decoding_workers": 8,
+  "resampling_mode_cpu": "PIL_LANCZOS",
+  "resampling_mode_gl": "GL_LANCZOS3",
+  "resampling_mode_dx": "DX_LANCZOS",
+  "show_advanced_cache_options": true,
+  "max_cache_size_mb": 4096,
+  "cpu_max_prefetch_pages": 10,
+  "gpu_max_prefetch_pages": 9,
+  "show_status_bar_info": true
+}
