@@ -1,21 +1,22 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod config;
 mod render;
 mod image;
 mod state;
 
 use crate::config::Settings;
-use crate::render::d2d::D2DRenderer;
-use crate::image::get_image_source;
-use crate::image::cache::create_shared_cache;
-use crate::image::loader::{AsyncLoader, LoaderRequest, LoaderResponse};
+use crate::render::d2d::{D2DRenderer, Renderer};
+use crate::image::{get_image_source, ImageSource};
+use crate::image::cache::{create_shared_cache, SharedImageCache};
+use crate::image::loader::{AsyncLoader, LoaderRequest, UserEvent};
 use crate::state::{AppState, BindingDirection};
 use std::sync::Arc;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
 use winit::{
     event::{Event, WindowEvent, ElementState, MouseButton, MouseScrollDelta, KeyEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::{ControlFlow, EventLoopBuilder},
     window::WindowBuilder,
     keyboard::{PhysicalKey, KeyCode, ModifiersState},
 };
@@ -77,15 +78,15 @@ impl ViewState {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = "config.json";
-    let settings = Settings::load_or_default(config_path);
+    let mut settings = Settings::load_or_default(config_path);
     if !std::path::Path::new(config_path).exists() { let _ = settings.save(config_path); }
 
     // Tokio Runtime
     let rt = Runtime::new()?;
     let _guard = rt.enter();
 
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Wait);
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
 
     let window = Arc::new(WindowBuilder::new()
         .with_title("HayateViewer Rust")
@@ -105,8 +106,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("Starting HayateViewer Rust...");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
 
-    let renderer = D2DRenderer::new(hwnd)?;
+    let mut renderer = D2DRenderer::new(hwnd)?;
     let mut view_state = ViewState::new();
     let mut app_state = AppState::new();
     let mut current_path_key = String::new();
@@ -116,27 +119,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app_state.spread_view_first_page_single = settings.spread_view_first_page_single;
 
     // Cache & Loader
-    let cpu_cache = create_shared_cache(100);
-    let loader = AsyncLoader::new(cpu_cache.clone());
+    let cache_capacity = (settings.max_cache_size_mb / 20).max(50) as usize; // 1枚 20MB と仮定して概算、最低50枚
+    let cpu_cache = create_shared_cache(cache_capacity);
+    let loader = AsyncLoader::new(cpu_cache.clone(), proxy);
+
+    {
+        use windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC;
+        use windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR;
+        use windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR;
+        use windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_CUBIC;
+
+        let mode = match settings.resampling_mode_dx.as_str() {
+            "DX_NEAREST" => D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+            "DX_LINEAR" => D2D1_INTERPOLATION_MODE_LINEAR,
+            "DX_CUBIC" => D2D1_INTERPOLATION_MODE_CUBIC,
+            "DX_HQC" => D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+            _ => D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+        };
+        renderer.set_interpolation_mode(mode);
+    }
 
     // 初期パスの読み込み
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
         if let Some(src) = get_image_source(&args[1]) {
-            app_state.image_files = vec!["".to_string(); src.len()];
+            if let ImageSource::Files(ref files) = src {
+                app_state.image_files = files.clone();
+            } else if let ImageSource::Archive(ref loader) = src {
+                app_state.image_files = loader.get_file_names().to_vec();
+            }
             current_path_key = args[1].clone();
+            update_window_title(&window, &current_path_key, &app_state);
+            rt.block_on(loader.send_request(LoaderRequest::Clear));
             rt.block_on(loader.send_request(LoaderRequest::SetSource { 
                 source: src, 
                 path_key: current_path_key.clone() 
             }));
-            request_pages_with_prefetch(&app_state, &loader, &rt);
+            request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
         }
     }
 
     let mut current_bitmaps: Vec<(usize, ID2D1Bitmap1)> = Vec::new();
     let mut modifiers = ModifiersState::default();
 
-    event_loop.run(move |event, elwt| {
+    event_loop.run(move |event: Event<UserEvent>, elwt| {
+        elwt.set_control_flow(ControlFlow::Wait);
         match event {
             Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
                 WindowEvent::CloseRequested => elwt.exit(),
@@ -148,16 +175,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Dropped file: {}", path_str);
                     if let Some(new_source) = get_image_source(&path_str) {
                         println!("Source created: {} files/entries", new_source.len());
-                        app_state.image_files = vec!["".to_string(); new_source.len()];
+                        if let ImageSource::Files(ref files) = new_source {
+                            app_state.image_files = files.clone();
+                        } else if let ImageSource::Archive(ref loader) = new_source {
+                            app_state.image_files = loader.get_file_names().to_vec();
+                        }
                         app_state.current_page_index = 0;
                         current_bitmaps.clear();
                         current_path_key = path_str.clone();
+                        update_window_title(&window, &current_path_key, &app_state);
                         
+                        rt.block_on(loader.send_request(LoaderRequest::Clear));
                         rt.block_on(loader.send_request(LoaderRequest::SetSource { 
                             source: new_source, 
                             path_key: path_str 
                         }));
-                        request_pages_with_prefetch(&app_state, &loader, &rt);
+                        request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                         window.request_redraw();
                     }
                 }
@@ -166,33 +199,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, .. }, .. } => {
                     match code {
+                        KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                            if app_state.is_options_open {
+                                let total_options = 7;
+                                if code == KeyCode::ArrowUp {
+                                    app_state.options_selected_index = (app_state.options_selected_index + total_options - 1) % total_options;
+                                } else {
+                                    app_state.options_selected_index = (app_state.options_selected_index + 1) % total_options;
+                                }
+                            }
+                        }
                         KeyCode::ArrowRight | KeyCode::ArrowLeft => {
-                            let direction = if code == KeyCode::ArrowRight { 1 } else { -1 };
-                            if modifiers.shift_key() {
-                                app_state.navigate(direction * 10);
-                            } else if modifiers.control_key() {
-                                let new_idx = (app_state.current_page_index as isize + direction as isize).clamp(0, (app_state.image_files.len() as isize - 1).max(0)) as usize;
-                                app_state.current_page_index = new_idx;
+                            if app_state.is_options_open {
+                                let direction = if code == KeyCode::ArrowRight { 1 } else { -1 };
+                                match app_state.options_selected_index {
+                                    1 => app_state.is_spread_view = !app_state.is_spread_view,
+                                    2 => app_state.binding_direction = if app_state.binding_direction == BindingDirection::Left { BindingDirection::Right } else { BindingDirection::Left },
+                                    3 => {
+                                        let modes = ["DX_NEAREST", "DX_LINEAR", "DX_CUBIC", "DX_HQC"];
+                                        let current_idx = modes.iter().position(|&m| m == settings.resampling_mode_dx).unwrap_or(3);
+                                        let new_idx = (current_idx as isize + direction as isize).rem_euclid(modes.len() as isize) as usize;
+                                        
+                                        settings.resampling_mode_dx = modes[new_idx].to_string();
+                                        
+                                        // レンダラーに即時反映
+                                        use windows::Win32::Graphics::Direct2D::*;
+                                        let d2d_mode = match modes[new_idx] {
+                                            "DX_NEAREST" => D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                                            "DX_LINEAR" => D2D1_INTERPOLATION_MODE_LINEAR,
+                                            "DX_CUBIC" => D2D1_INTERPOLATION_MODE_CUBIC,
+                                            _ => D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                                        };
+                                        renderer.set_interpolation_mode(d2d_mode);
+                                        let _ = settings.save("config.json");
+                                    }
+                                    4 => {
+                                        if direction > 0 { settings.max_cache_size_mb += 512; }
+                                        else { settings.max_cache_size_mb = settings.max_cache_size_mb.saturating_sub(512); }
+                                        let _ = settings.save("config.json");
+                                    }
+                                    5 => {
+                                        if direction > 0 { settings.cpu_max_prefetch_pages += 1; }
+                                        else { settings.cpu_max_prefetch_pages = settings.cpu_max_prefetch_pages.saturating_sub(1); }
+                                        let _ = settings.save("config.json");
+                                    }
+                                    6 => {
+                                        settings.show_status_bar_info = !settings.show_status_bar_info;
+                                        let _ = settings.save("config.json");
+                                    }
+                                    _ => (),
+                                }
                             } else {
-                                app_state.navigate(direction);
+                                // ページ移動
+                                let direction = if code == KeyCode::ArrowRight { 1 } else { -1 };
+                                if modifiers.shift_key() {
+                                    app_state.navigate(direction * 10);
+                                } else if modifiers.control_key() {
+                                    let new_idx = (app_state.current_page_index as isize + direction as isize).clamp(0, (app_state.image_files.len() as isize - 1).max(0)) as usize;
+                                    app_state.current_page_index = new_idx;
+                                } else {
+                                    app_state.navigate(direction);
+                                }
+                                view_state.reset();
+                                request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                             }
-                            view_state.reset();
-                            request_pages_with_prefetch(&app_state, &loader, &rt);
-                        },
+                        }
                         KeyCode::KeyB => {
-                            if !app_state.is_spread_view {
-                                app_state.is_spread_view = true;
-                                app_state.binding_direction = BindingDirection::Right;
-                            } else if app_state.binding_direction == BindingDirection::Right {
-                                app_state.binding_direction = BindingDirection::Left;
-                            } else {
-                                app_state.is_spread_view = false;
+                            if !app_state.is_options_open {
+                                if !app_state.is_spread_view {
+                                    app_state.is_spread_view = true;
+                                    app_state.binding_direction = BindingDirection::Right;
+                                } else if app_state.binding_direction == BindingDirection::Right {
+                                    app_state.binding_direction = BindingDirection::Left;
+                                } else {
+                                    app_state.is_spread_view = false;
+                                }
+                                view_state.reset();
+                                request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                             }
-                            view_state.reset();
-                            request_pages_with_prefetch(&app_state, &loader, &rt);
-                        },
+                        }
                         KeyCode::NumpadMultiply => {
                             view_state.reset();
+                        }
+                        KeyCode::KeyO => {
+                            app_state.is_options_open = !app_state.is_options_open;
+                            window.request_redraw();
+                        }
+                        KeyCode::Escape => {
+                            if app_state.is_options_open {
+                                app_state.is_options_open = false;
+                                window.request_redraw();
+                            }
                         }
                         _ => (),
                     }
@@ -246,22 +343,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if scroll.abs() > 0.1 {
                         let direction = if scroll > 0.0 { -1 } else { 1 };
                         app_state.navigate(direction);
+                        current_bitmaps.clear();
                         view_state.reset();
-                        request_pages_with_prefetch(&app_state, &loader, &rt);
+                        request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                         window.request_redraw();
                     }
                 }
                 WindowEvent::RedrawRequested => {
                     // 非同期レスポンスのチェック
-                    while let Some(res) = loader.try_recv_response() {
-                        match res {
-                            LoaderResponse::Loaded { index, .. } => {
-                                if app_state.get_page_indices_to_display().contains(&index) {
-                                    window.request_redraw();
-                                }
-                            }
-                        }
+                    while let Some(_) = loader.try_recv_response() {
+                        window.request_redraw();
                     }
+
+                    let window_size = window.inner_size();
+                    let win_w = window_size.width as f32;
+                    let win_h = window_size.height as f32;
 
                     let indices = app_state.get_page_indices_to_display();
                     
@@ -292,10 +388,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if !bitmaps_to_draw.is_empty() {
                         unsafe {
-                            let window_size = window.inner_size();
-                            let win_w = window_size.width as f32;
-                            let win_h = window_size.height as f32;
-
                             let mut total_content_w = 0.0;
                             let mut max_content_h = 0.0;
                             for bmp in &bitmaps_to_draw {
@@ -336,10 +428,124 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
+                    // ステータスバーの描画
+                    let bar_h = 25.0;
+                    let bar_rect = D2D_RECT_F {
+                        left: 0.0,
+                        top: win_h - bar_h,
+                        right: win_w,
+                        bottom: win_h,
+                    };
+                    if settings.show_status_bar_info {
+                        renderer.fill_rectangle(&bar_rect, &D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.5 });
+                    }
+
+                    let total_pages = app_state.image_files.len();
+                    let current_page = app_state.current_page_index + 1;
+                    
+                    let cpu_indices: Vec<usize> = {
+                        let keys = cpu_cache.lock().unwrap().get_keys();
+                        keys.iter().filter_map(|k| k.rsplit("::").next()?.parse().ok()).collect()
+                    };
+                    let gpu_indices: Vec<usize> = current_bitmaps.iter().map(|(idx, _)| *idx).collect();
+
+                    let path_preview: String = current_path_key.chars().take(20).collect();
+                    let status_text = format!(
+                        " Page: {} / {} | Backend: Direct2D | CPU: {}p {} | GPU: {}p {} | Key: {}",
+                        current_page,
+                        total_pages,
+                        cpu_indices.len(),
+                        format_page_list(&cpu_indices),
+                        gpu_indices.len(),
+                        format_page_list(&gpu_indices),
+                        path_preview
+                    );
+                    if settings.show_status_bar_info {
+                        renderer.draw_text(&status_text, &bar_rect, &D2D1_COLOR_F { r: 0.9, g: 0.9, b: 0.9, a: 1.0 });
+                    }
+
+                    update_window_title(&window, &current_path_key, &app_state);
+
+                    // 設定オーバーレイの描画
+                    if app_state.is_options_open {
+                        let overlay_w = 400.0;
+                        let overlay_h = 450.0;
+                        let overlay_rect = D2D_RECT_F {
+                            left: (win_w - overlay_w) / 2.0,
+                            top: (win_h - overlay_h) / 2.0,
+                            right: (win_w + overlay_w) / 2.0,
+                            bottom: (win_h + overlay_h) / 2.0,
+                        };
+
+                        // 背景（半透明の黒）
+                        renderer.fill_rectangle(&overlay_rect, &D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.8 });
+                        
+                        let mut text_rect = D2D_RECT_F {
+                            left: overlay_rect.left + 20.0,
+                            top: overlay_rect.top + 20.0,
+                            right: overlay_rect.right - 20.0,
+                            bottom: overlay_rect.top + 50.0,
+                        };
+
+                        renderer.draw_text("--- 設定 ---", &text_rect, &D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+                        text_rect.top += 40.0;
+                        text_rect.bottom += 40.0;
+
+                        let options = [
+                            ("レンダリングエンジン", settings.rendering_backend.as_str()),
+                            ("見開き表示", if app_state.is_spread_view { "オン" } else { "オフ" }),
+                            ("綴じ方向", if app_state.binding_direction == BindingDirection::Right { "右綴じ" } else { "左綴じ" }),
+                            ("補間モード (DX)", settings.resampling_mode_dx.as_str()),
+                            ("最大キャッシュ容量", &format!("{} MB", settings.max_cache_size_mb)),
+                            ("CPU 先読み数", &format!("{} ページ", settings.cpu_max_prefetch_pages)),
+                            ("ステータスバー", if settings.show_status_bar_info { "表示" } else { "非表示" }),
+                        ];
+
+                        for (i, (label, value)) in options.iter().enumerate() {
+                            let is_selected = i == app_state.options_selected_index;
+                            let color = if is_selected {
+                                D2D1_COLOR_F { r: 0.2, g: 0.6, b: 1.0, a: 1.0 }
+                            } else {
+                                D2D1_COLOR_F { r: 0.8, g: 0.8, b: 0.8, a: 1.0 }
+                            };
+
+                            if is_selected {
+                                let sel_rect = D2D_RECT_F {
+                                    left: overlay_rect.left + 10.0,
+                                    top: text_rect.top - 2.0,
+                                    right: overlay_rect.right - 10.0,
+                                    bottom: text_rect.bottom + 2.0,
+                                };
+                                renderer.fill_rectangle(&sel_rect, &D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.2 });
+                            }
+
+                            let display_text = format!("{}: {}", label, value);
+                            renderer.draw_text(&display_text, &text_rect, &color);
+                            
+                            text_rect.top += 35.0;
+                            text_rect.bottom += 35.0;
+                        }
+
+                        let hint_rect = D2D_RECT_F {
+                            left: overlay_rect.left + 20.0,
+                            top: overlay_rect.bottom - 40.0,
+                            right: overlay_rect.right - 20.0,
+                            bottom: overlay_rect.bottom - 10.0,
+                        };
+                        renderer.draw_text("矢印キーで変更、'O'キーで閉じる", &hint_rect, &D2D1_COLOR_F { r: 0.5, g: 0.5, b: 0.5, a: 1.0 });
+                    }
+
                     let _ = renderer.end_draw();
                 }
                 _ => (),
             },
+            Event::UserEvent(user_event) => {
+                match user_event {
+                    UserEvent::PageLoaded(_) => {
+                        window.request_redraw();
+                    }
+                }
+            }
             Event::AboutToWait => {
                 window.request_redraw();
             }
@@ -350,34 +556,107 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &Runtime) {
+fn update_window_title(window: &winit::window::Window, path_key: &str, app_state: &AppState) {
+    if path_key.is_empty() {
+        window.set_title("HayateViewer Rust");
+        return;
+    }
+
+    let base_name = std::path::Path::new(path_key)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path_key.to_string());
+
+    let indices = app_state.get_page_indices_to_display();
+    let mut names = Vec::new();
+    for &idx in &indices {
+        if idx < app_state.image_files.len() {
+            let name = std::path::Path::new(&app_state.image_files[idx])
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("Page {}", idx + 1));
+            if !name.is_empty() {
+                names.push(name);
+            }
+        }
+    }
+
+    if names.is_empty() {
+        window.set_title(&format!("{} - HayateViewer Rust", base_name));
+    } else {
+        window.set_title(&format!("{} - {} - HayateViewer Rust", base_name, names.join(" / ")));
+    }
+}
+
+fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &Runtime, cpu_cache: &SharedImageCache, settings: &Settings, path_key: &str) {
     let display_indices = app_state.get_page_indices_to_display();
     let max_idx = app_state.image_files.len() as isize - 1;
     if max_idx < 0 { return; }
 
-    // 1. 表示対象 (Priority 0)
+    let loader_tx = loader.clone_tx();
+
+    // 1. 表示対象の即時リクエスト (Priority 0)
     for &idx in &display_indices {
-        rt.block_on(loader.send_request(LoaderRequest::Load { index: idx, priority: 0 }));
+        let key = format!("{}::{}", path_key, idx);
+        let cached = cpu_cache.lock().unwrap().get(&key).is_some();
+        if !cached {
+            println!("[Prefetch] Requesting immediate load for index {}", idx);
+            let l = loader_tx.clone();
+            rt.spawn(async move {
+                let _ = l.send(LoaderRequest::Load { index: idx, priority: 0 }).await;
+            });
+        }
     }
 
-    // 2. 先読み (Priority 1)
-    let prefetch_range = 5;
-    let mut prefetch_indices = Vec::new();
+    // 2. 先読み範囲の計算と「歯抜け」補充 (Priority 1)
+    let prefetch_dist = settings.cpu_max_prefetch_pages;
+    let mut targets = std::collections::HashSet::new();
+    
     for &idx in &display_indices {
-        for i in 1..=prefetch_range {
-            let next = idx as isize + i;
-            let prev = idx as isize - i;
-            if next <= max_idx { prefetch_indices.push(next as usize); }
-            if prev >= 0 { prefetch_indices.push(prev as usize); }
+        let start = (idx as isize - prefetch_dist as isize).max(0) as usize;
+        let end = (idx as isize + prefetch_dist as isize).min(max_idx) as usize;
+        for i in start..=end {
+            if !display_indices.contains(&i) {
+                targets.insert(i);
+            }
         }
     }
+
+    let mut targets_vec: Vec<_> = targets.into_iter().collect();
+    // 現在のページに近い順にソート（効率的な補充のため）
+    let current = app_state.current_page_index as isize;
+    targets_vec.sort_by_key(|&idx| (idx as isize - current).abs());
     
-    // 重複と表示対象を除外して送信
-    prefetch_indices.sort();
-    prefetch_indices.dedup();
-    for idx in prefetch_indices {
-        if !display_indices.contains(&idx) {
-            rt.block_on(loader.send_request(LoaderRequest::Load { index: idx, priority: 1 }));
+    if !targets_vec.is_empty() {
+        println!("[Prefetch] Gap filling targets: {:?}", targets_vec);
+    }
+
+    for idx in targets_vec {
+        let key = format!("{}::{}", path_key, idx);
+        let cached = {
+            let mut c = cpu_cache.lock().unwrap();
+            c.get(&key).is_some()
+        };
+        
+        if !cached {
+            let l = loader_tx.clone();
+            rt.spawn(async move {
+                let _ = l.send(LoaderRequest::Load { index: idx, priority: 1 }).await;
+            });
         }
+    }
+}
+
+fn format_page_list(indices: &[usize]) -> String {
+    if indices.is_empty() {
+        return "[]".to_string();
+    }
+    let mut sorted = indices.to_vec();
+    sorted.sort();
+    
+    if sorted.len() > 5 {
+        format!("[{}, {}, {}, ..., {}]", sorted[0] + 1, sorted[1] + 1, sorted[2] + 1, sorted.last().unwrap() + 1)
+    } else {
+        format!("{:?}", sorted.iter().map(|i| i + 1).collect::<Vec<_>>())
     }
 }

@@ -5,6 +5,8 @@ pub struct AppState {
     pub is_spread_view: bool,
     pub binding_direction: BindingDirection,
     pub spread_view_first_page_single: bool,
+    pub is_options_open: bool,
+    pub options_selected_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +24,8 @@ impl AppState {
             is_spread_view: true,
             binding_direction: BindingDirection::Right,
             spread_view_first_page_single: true,
+            is_options_open: false,
+            options_selected_index: 0,
         }
     }
 

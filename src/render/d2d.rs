@@ -2,14 +2,94 @@ use std::mem::ManuallyDrop;
 use windows::{
     core::*, Win32::Foundation::*, Win32::Graphics::Direct2D::Common::*, Win32::Graphics::Direct2D::*,
     Win32::Graphics::Direct3D::*, Win32::Graphics::Direct3D11::*, Win32::Graphics::Dxgi::Common::*,
-    Win32::Graphics::Dxgi::*,
+    Win32::Graphics::Dxgi::*, Win32::Graphics::DirectWrite::*,
 };
+
+pub trait Renderer {
+    fn resize(&self, width: u32, height: u32) -> Result<()>;
+    fn begin_draw(&self);
+    fn end_draw(&self) -> Result<()>;
+    fn draw_bitmap(&self, bitmap: &ID2D1Bitmap1, dest_rect: &D2D_RECT_F);
+    fn fill_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F);
+    fn draw_text(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F);
+    fn set_interpolation_mode(&mut self, mode: D2D1_INTERPOLATION_MODE);
+}
 
 pub struct D2DRenderer {
     pub _factory: ID2D1Factory1,
     pub _device: ID2D1Device,
     pub context: ID2D1DeviceContext,
     pub swap_chain: IDXGISwapChain1,
+    pub dw_factory: IDWriteFactory,
+    pub text_format: IDWriteTextFormat,
+    pub brush: ID2D1SolidColorBrush,
+    pub interpolation_mode: D2D1_INTERPOLATION_MODE,
+}
+
+impl Renderer for D2DRenderer {
+    fn resize(&self, width: u32, height: u32) -> Result<()> {
+        unsafe {
+            self.context.SetTarget(None);
+            self.swap_chain.ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0))?;
+            let surface: IDXGISurface = self.swap_chain.GetBuffer(0)?;
+            let back_buffer: ID2D1Bitmap1 = self.context.CreateBitmapFromDxgiSurface(&surface, None)?;
+            self.context.SetTarget(&back_buffer);
+            Ok(())
+        }
+    }
+
+    fn begin_draw(&self) {
+        unsafe {
+            self.context.BeginDraw();
+            self.context.Clear(Some(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 0.8 }));
+        }
+    }
+
+    fn end_draw(&self) -> Result<()> {
+        unsafe {
+            self.context.EndDraw(None, None)?;
+            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()
+        }
+    }
+
+    fn draw_bitmap(&self, bitmap: &ID2D1Bitmap1, dest_rect: &D2D_RECT_F) {
+        unsafe {
+            self.context.DrawBitmap(
+                bitmap,
+                Some(dest_rect),
+                1.0,
+                self.interpolation_mode,
+                None,
+                None,
+            );
+        }
+    }
+
+    fn fill_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F) {
+        unsafe {
+            self.brush.SetColor(color);
+            self.context.FillRectangle(rect, &self.brush);
+        }
+    }
+
+    fn draw_text(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F) {
+        unsafe {
+            self.brush.SetColor(color);
+            let wide_text: Vec<u16> = text.encode_utf16().collect();
+            self.context.DrawText(
+                &wide_text,
+                &self.text_format,
+                rect,
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+
+    fn set_interpolation_mode(&mut self, mode: D2D1_INTERPOLATION_MODE) {
+        self.interpolation_mode = mode;
+    }
 }
 
 impl D2DRenderer {
@@ -59,23 +139,30 @@ impl D2DRenderer {
             let back_buffer: ID2D1Bitmap1 = context.CreateBitmapFromDxgiSurface(&surface, None)?;
             context.SetTarget(&back_buffer);
 
+            // DirectWrite と ブラシの作成
+            let dw_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let text_format = dw_factory.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                14.0,
+                w!("ja-jp"),
+            )?;
+
+            let brush = context.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?;
+
             Ok(Self {
                 _factory: factory,
                 _device: device,
                 context,
                 swap_chain,
+                dw_factory,
+                text_format,
+                brush,
+                interpolation_mode: D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
             })
-        }
-    }
-
-    pub fn resize(&self, width: u32, height: u32) -> Result<()> {
-        unsafe {
-            self.context.SetTarget(None);
-            self.swap_chain.ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0))?;
-            let surface: IDXGISurface = self.swap_chain.GetBuffer(0)?;
-            let back_buffer: ID2D1Bitmap1 = self.context.CreateBitmapFromDxgiSurface(&surface, None)?;
-            self.context.SetTarget(&back_buffer);
-            Ok(())
         }
     }
 
@@ -83,7 +170,7 @@ impl D2DRenderer {
         unsafe {
             let props = D2D1_BITMAP_PROPERTIES1 {
                 pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_R8G8B8A8_UNORM, // 修正
+                    format: DXGI_FORMAT_R8G8B8A8_UNORM,
                     alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
                 },
                 dpiX: 96.0,
@@ -98,33 +185,6 @@ impl D2DRenderer {
                 width * 4,
                 &props,
             )
-        }
-    }
-
-    pub fn draw_bitmap(&self, bitmap: &ID2D1Bitmap1, dest_rect: &D2D_RECT_F) {
-        unsafe {
-            self.context.DrawBitmap(
-                bitmap,
-                Some(dest_rect),
-                1.0,
-                D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-                None,
-                None,
-            );
-        }
-    }
-
-    pub fn begin_draw(&self) {
-        unsafe {
-            self.context.BeginDraw();
-            self.context.Clear(Some(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 0.8 }));
-        }
-    }
-
-    pub fn end_draw(&self) -> Result<()> {
-        unsafe {
-            self.context.EndDraw(None, None)?;
-            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()
         }
     }
 }
