@@ -4,6 +4,8 @@ mod render;
 mod image;
 mod state;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 use crate::config::Settings;
 use crate::render::d2d::{D2DRenderer, Renderer};
 use crate::image::{get_image_source, ImageSource};
@@ -96,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proxy = event_loop.create_proxy();
 
     let window = Arc::new(WindowBuilder::new()
-        .with_title("HayateViewer Rust")
+        .with_title(format!("HayateViewer Rust v{}", VERSION))
         .with_inner_size(winit::dpi::LogicalSize::new(settings.window_size.0, settings.window_size.1))
         .with_drag_and_drop(true)
         .build(&event_loop)?);
@@ -568,7 +570,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn update_window_title(window: &winit::window::Window, path_key: &str, app_state: &AppState) {
     if path_key.is_empty() {
-        window.set_title("HayateViewer Rust");
+        window.set_title(&format!("HayateViewer Rust v{}", VERSION));
         return;
     }
 
@@ -592,9 +594,9 @@ fn update_window_title(window: &winit::window::Window, path_key: &str, app_state
     }
 
     if names.is_empty() {
-        window.set_title(&format!("{} - HayateViewer Rust", base_name));
+        window.set_title(&format!("{} - HayateViewer Rust v{}", base_name, VERSION));
     } else {
-        window.set_title(&format!("{} - {} - HayateViewer Rust", base_name, names.join(" / ")));
+        window.set_title(&format!("{} - {} - HayateViewer Rust v{}", base_name, names.join(" / "), VERSION));
     }
 }
 
