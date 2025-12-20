@@ -16,7 +16,7 @@ use winit::{
     event::{Event, WindowEvent, ElementState, MouseButton, MouseScrollDelta, KeyEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
-    keyboard::{PhysicalKey, KeyCode},
+    keyboard::{PhysicalKey, KeyCode, ModifiersState},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use walkdir::WalkDir;
@@ -25,7 +25,10 @@ use winit::platform::windows::WindowBuilderExtWindows;
 struct ViewState {
     zoom_level: f32,
     pan_offset: (f32, f32),
-    is_dragging: bool,
+    is_panning: bool,
+    is_loupe: bool,
+    loupe_base_zoom: f32,
+    loupe_base_pan: (f32, f32),
     last_mouse_pos: (f32, f32),
     cursor_pos: (f32, f32),
 }
@@ -35,15 +38,18 @@ impl ViewState {
         Self {
             zoom_level: 1.0,
             pan_offset: (0.0, 0.0),
-            is_dragging: false,
+            is_panning: false,
+            is_loupe: false,
+            loupe_base_zoom: 1.0,
+            loupe_base_pan: (0.0, 0.0),
             last_mouse_pos: (0.0, 0.0),
             cursor_pos: (0.0, 0.0),
         }
     }
 
-    fn zoom(&mut self, factor: f32, center: (f32, f32)) {
+    fn set_zoom(&mut self, new_zoom: f32, center: (f32, f32)) {
         let old_zoom = self.zoom_level;
-        self.zoom_level *= factor;
+        self.zoom_level = new_zoom;
         if self.zoom_level < 0.1 { self.zoom_level = 0.1; }
         if self.zoom_level > 50.0 { self.zoom_level = 50.0; }
 
@@ -58,6 +64,13 @@ impl ViewState {
 
         self.pan_offset.0 = self.pan_offset.0.clamp(-max_pan_x, max_pan_x);
         self.pan_offset.1 = self.pan_offset.1.clamp(-max_pan_y, max_pan_y);
+    }
+
+    fn reset(&mut self) {
+        self.zoom_level = 1.0;
+        self.pan_offset = (0.0, 0.0);
+        self.is_panning = false;
+        self.is_loupe = false;
     }
 }
 
@@ -158,11 +171,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if let Some(ref src) = image_source {
-        // AppStateにファイル数を伝える（暫定的に中身は空にするか、何らかのダミーを入れる）
         app_state.image_files = vec!["".to_string(); src.len()];
     }
 
     let mut current_bitmaps: Vec<(usize, ID2D1Bitmap1)> = Vec::new();
+    let mut modifiers = ModifiersState::default();
 
     event_loop.run(move |event, elwt| {
         match event {
@@ -188,26 +201,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("Failed to create source from: {}", path_str);
                     }
                 }
+                WindowEvent::ModifiersChanged(new_modifiers) => {
+                    modifiers = new_modifiers.state();
+                }
                 WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, .. }, .. } => {
                     match code {
-                        KeyCode::ArrowRight => {
-                            app_state.navigate(1);
+                        KeyCode::ArrowRight | KeyCode::ArrowLeft => {
+                            let direction = if code == KeyCode::ArrowRight { 1 } else { -1 };
+                            
+                            if modifiers.shift_key() {
+                                // フォルダ移動 (Python版 _navigate_folder 相当)
+                                // 本来はフォルダ境界を探すべきだが、現在は簡易的に大きくスキップ
+                                app_state.navigate(direction * 10);
+                            } else if modifiers.control_key() {
+                                // 単一ページ移動
+                                let new_idx = (app_state.current_page_index as isize + direction as isize).clamp(0, (app_state.image_files.len() as isize - 1).max(0)) as usize;
+                                app_state.current_page_index = new_idx;
+                            } else {
+                                // 通常移動
+                                app_state.navigate(direction);
+                            }
                             current_bitmaps.clear();
-                        },
-                        KeyCode::ArrowLeft => {
-                            app_state.navigate(-1);
-                            current_bitmaps.clear();
+                            view_state.reset();
                         },
                         KeyCode::KeyB => {
-                            app_state.is_spread_view = !app_state.is_spread_view;
+                            // 表示モードのサイクル切替: Single -> Spread RTL -> Spread LTR -> Single
+                            if !app_state.is_spread_view {
+                                app_state.is_spread_view = true;
+                                app_state.binding_direction = BindingDirection::Right;
+                            } else if app_state.binding_direction == BindingDirection::Right {
+                                app_state.binding_direction = BindingDirection::Left;
+                            } else {
+                                app_state.is_spread_view = false;
+                            }
                             current_bitmaps.clear();
-                        }
-                        KeyCode::KeyL => {
-                            app_state.binding_direction = match app_state.binding_direction {
-                                BindingDirection::Left => BindingDirection::Right,
-                                BindingDirection::Right => BindingDirection::Left,
-                            };
-                            current_bitmaps.clear();
+                            view_state.reset();
+                        },
+                        KeyCode::NumpadMultiply => {
+                            view_state.reset();
                         }
                         _ => (),
                     }
@@ -215,27 +246,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     let pos = (position.x as f32, position.y as f32);
-                    if view_state.is_dragging {
+                    if view_state.is_panning || view_state.is_loupe {
                         view_state.pan_offset.0 += pos.0 - view_state.last_mouse_pos.0;
                         view_state.pan_offset.1 += pos.1 - view_state.last_mouse_pos.1;
                     }
                     view_state.last_mouse_pos = pos;
                     view_state.cursor_pos = pos;
+                    window.request_redraw();
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
-                    if button == MouseButton::Left {
-                        view_state.is_dragging = state == ElementState::Pressed;
-                    } else if button == MouseButton::Right && state == ElementState::Pressed {
-                        view_state.zoom_level = 1.0;
-                        view_state.pan_offset = (0.0, 0.0);
+                    match button {
+                        MouseButton::Left => {
+                            if state == ElementState::Pressed {
+                                if view_state.zoom_level > 1.0 {
+                                    view_state.is_panning = true;
+                                }
+                            } else {
+                                view_state.is_panning = false;
+                            }
+                        }
+                        MouseButton::Right => {
+                            if state == ElementState::Pressed {
+                                // 拡大ルーペ開始
+                                view_state.is_loupe = true;
+                                view_state.loupe_base_zoom = view_state.zoom_level;
+                                view_state.loupe_base_pan = view_state.pan_offset;
+                                view_state.set_zoom(view_state.zoom_level * 2.0, view_state.cursor_pos);
+                            } else {
+                                // 拡大ルーペ終了
+                                if view_state.is_loupe {
+                                    view_state.zoom_level = view_state.loupe_base_zoom;
+                                    view_state.pan_offset = view_state.loupe_base_pan;
+                                    view_state.is_loupe = false;
+                                }
+                            }
+                        }
+                        _ => (),
                     }
+                    window.request_redraw();
                 }
                 WindowEvent::MouseWheel { delta, .. } => {
-                    let factor = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => 1.1f32.powf(y),
-                        MouseScrollDelta::PixelDelta(pos) => 1.1f32.powf(pos.y as f32 / 100.0),
+                    // Python版準拠: ホイールはページ送り
+                    let scroll = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(pos) => (pos.y / 120.0) as f32,
                     };
-                    view_state.zoom(factor, view_state.cursor_pos);
+                    
+                    if scroll.abs() > 0.1 {
+                        let direction = if scroll > 0.0 { -1 } else { 1 };
+                        app_state.navigate(direction);
+                        current_bitmaps.clear();
+                        view_state.reset();
+                        window.request_redraw();
+                    }
                 }
                 WindowEvent::RedrawRequested => {
                     if let Some(ref mut source) = image_source {
@@ -274,32 +337,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if size.height > max_content_h { max_content_h = size.height; }
                                 }
 
-                                let scale_fit = (win_w / total_content_w).min(win_h / max_content_h);
-                                let total_scale = scale_fit * view_state.zoom_level;
+                                if total_content_w > 0.0 && max_content_h > 0.0 {
+                                    let scale_fit = (win_w / total_content_w).min(win_h / max_content_h);
+                                    let total_scale = scale_fit * view_state.zoom_level;
 
-                                let draw_total_w = total_content_w * total_scale;
-                                let draw_max_h = max_content_h * total_scale;
+                                    let draw_total_w = total_content_w * total_scale;
+                                    let draw_max_h = max_content_h * total_scale;
 
-                                view_state.clamp_pan_offset((win_w, win_h), (draw_total_w, draw_max_h));
+                                    view_state.clamp_pan_offset((win_w, win_h), (draw_total_w, draw_max_h));
 
-                                let base_x = (win_w - draw_total_w) / 2.0 + view_state.pan_offset.0;
-                                let base_y = (win_h - draw_max_h) / 2.0 + view_state.pan_offset.1;
+                                    let base_x = (win_w - draw_total_w) / 2.0 + view_state.pan_offset.0;
+                                    let base_y = (win_h - draw_max_h) / 2.0 + view_state.pan_offset.1;
 
-                                let mut current_x = base_x;
-                                for bmp in &bitmaps_to_draw {
-                                    let size = bmp.GetSize();
-                                    let w = size.width * total_scale;
-                                    let h = size.height * total_scale;
-                                    let y = base_y + (draw_max_h - h) / 2.0;
+                                    let mut current_x = base_x;
+                                    for bmp in &bitmaps_to_draw {
+                                        let size = bmp.GetSize();
+                                        let w = size.width * total_scale;
+                                        let h = size.height * total_scale;
+                                        let y = base_y + (draw_max_h - h) / 2.0;
 
-                                    let dest_rect = D2D_RECT_F {
-                                        left: current_x,
-                                        top: y,
-                                        right: current_x + w,
-                                        bottom: y + h,
-                                    };
-                                    renderer.draw_bitmap(bmp, &dest_rect);
-                                    current_x += w;
+                                        let dest_rect = D2D_RECT_F {
+                                            left: current_x,
+                                            top: y,
+                                            right: current_x + w,
+                                            bottom: y + h,
+                                        };
+                                        renderer.draw_bitmap(bmp, &dest_rect);
+                                        current_x += w;
+                                    }
                                 }
                             }
                         }
