@@ -6,8 +6,8 @@ use windows::{
 };
 
 pub struct D2DRenderer {
-    pub factory: ID2D1Factory1,
-    pub device: ID2D1Device,
+    pub _factory: ID2D1Factory1,
+    pub _device: ID2D1Device,
     pub context: ID2D1DeviceContext,
     pub swap_chain: IDXGISwapChain1,
 }
@@ -60,8 +60,8 @@ impl D2DRenderer {
             context.SetTarget(&back_buffer);
 
             Ok(Self {
-                factory,
-                device,
+                _factory: factory,
+                _device: device,
                 context,
                 swap_chain,
             })
@@ -117,7 +117,7 @@ impl D2DRenderer {
     pub fn begin_draw(&self) {
         unsafe {
             self.context.BeginDraw();
-            self.context.Clear(Some(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }));
+            self.context.Clear(Some(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 0.8 }));
         }
     }
 
