@@ -105,7 +105,7 @@ impl AsyncLoader {
 
                 match next_req {
                     LoaderRequest::Load { index, priority } => {
-                        if let Some(ref mut source) = current_source {
+                        if let Some(ref mut _source) = current_source {
                             let key = format!("{}::{}", current_path_key, index);
                             
                             let already_cached = {
@@ -115,7 +115,15 @@ impl AsyncLoader {
 
                             if !already_cached {
                                 println!("[読み込み] デコード中: インデックス {} (優先度 {})...", index, priority);
-                                let res = source.load_image(index).map_err(|e| e.to_string());
+                                // 重い処理（特に7z一括展開）をスレッドプールに逃がす
+                                let mut source_for_task = current_source.take().unwrap();
+                                let (res, returned_source) = tokio::task::spawn_blocking(move || {
+                                    let r = source_for_task.load_image(index).map_err(|e| e.to_string());
+                                    (r, source_for_task)
+                                }).await.unwrap();
+                                
+                                current_source = Some(returned_source);
+
                                 match res {
                                     Ok(decoded) => {
                                         {

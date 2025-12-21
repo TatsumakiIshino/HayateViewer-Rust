@@ -1,6 +1,8 @@
 use std::io::Read;
 use zip::ZipArchive;
 use sevenz_rust;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use crate::image::decoder::{DecodedImage, _decode_image_from_memory};
 
 pub enum ArchiveInternal {
@@ -16,6 +18,8 @@ pub enum ArchiveInternal {
 pub struct ArchiveLoader {
     internal: ArchiveInternal,
     file_names: Vec<String>,
+    // メモリキャッシュ: パス名 -> ファイルデータ
+    cache: Arc<Mutex<Option<HashMap<String, Vec<u8>>>>>,
 }
 
 impl ArchiveLoader {
@@ -44,6 +48,7 @@ impl ArchiveLoader {
             Ok(Self {
                 internal: ArchiveInternal::Zip(archive),
                 file_names,
+                cache: Arc::new(Mutex::new(None)),
             })
         } else if ext == "7z" {
             // 7z のファイルリストを取得（高速）
@@ -66,6 +71,7 @@ impl ArchiveLoader {
                     archive_path: path_buf,
                 },
                 file_names,
+                cache: Arc::new(Mutex::new(None)),
             })
         } else if ext == "rar" || ext == "cbr" {
             // unrar クレートを使用してファイルリストを取得（高速）
@@ -91,6 +97,7 @@ impl ArchiveLoader {
                     archive_path: path_buf,
                 },
                 file_names,
+                cache: Arc::new(Mutex::new(None)),
             })
         } else {
             Err("Unsupported archive format".into())
@@ -103,56 +110,66 @@ impl ArchiveLoader {
 
     pub fn load_image(&mut self, index: usize) -> Result<DecodedImage, Box<dyn std::error::Error>> {
         let name = &self.file_names[index];
-        let mut buffer = Vec::new();
-
-        match self.internal {
-            ArchiveInternal::Zip(ref mut archive) => {
-                let mut file = archive.by_name(name)?;
-                file.read_to_end(&mut buffer)?;
-            }
-            ArchiveInternal::SevenZ { ref archive_path } => {
-                // 7z から該当ファイルをメモリへ直接展開
-                let mut found = false;
-                sevenz_rust::SevenZReader::open(archive_path, sevenz_rust::Password::empty())?
-                    .for_each_entries(|entry, reader| {
-                        if entry.name().replace("\\", "/") == *name {
-                            reader.read_to_end(&mut buffer)?;
-                            found = true;
-                            return Ok(false); // 目的のファイルが見つかったので中断
-                        }
-                        Ok(true)
-                    })?;
-                if !found {
-                    return Err(format!("File '{}' not found in 7z archive", name).into());
+        
+        // 1. キャッシュチェック
+        {
+            let cache = self.cache.lock().unwrap();
+            if let Some(ref map) = *cache {
+                if let Some(data) = map.get(name) {
+                    println!("[Archive] Cache hit: {}", name);
+                    return _decode_image_from_memory(data).map_err(|e| e.into());
                 }
             }
-            ArchiveInternal::Rar { ref archive_path } => {
-                // RAR から該当ファイルをメモリへ直接展開（Unidirectional Stream なので該当ファイルまで読み飛ばし）
-                let mut archive = unrar::Archive::new(archive_path).open_for_processing()?;
-                'outer: loop {
-                    match archive.read_header() {
-                        Ok(Some(header)) => {
-                            let filename = header.entry().filename.to_string_lossy().replace("\\", "/");
-                            if filename == *name {
-                                let (data, _next_archive) = header.read()?;
-                                buffer = data;
-                                break 'outer;
-                            } else {
-                                archive = header.skip()?;
-                            }
-                        }
-                        Ok(None) => break 'outer,
-                        Err(e) => return Err(e.into()),
+        }
+
+        // 2. キャッシュがなければ一括展開
+        println!("[Archive] Initial slurping to memory...");
+        let mut new_cache = HashMap::new();
+        
+        match self.internal {
+            ArchiveInternal::Zip(ref mut archive) => {
+                for i in 0..archive.len() {
+                    let mut file = archive.by_index(i)?;
+                    if file.is_file() {
+                        let fname = file.name().to_string();
+                        let mut buffer = Vec::new();
+                        file.read_to_end(&mut buffer)?;
+                        new_cache.insert(fname, buffer);
                     }
                 }
             }
-        }
-        
-        if buffer.is_empty() {
-            return Err(format!("File '{}' not found in archive", name).into());
+            ArchiveInternal::SevenZ { ref archive_path } => {
+                let mut reader = sevenz_rust::SevenZReader::open(archive_path, sevenz_rust::Password::empty())?;
+                reader.for_each_entries(|entry, entry_reader| {
+                    if !entry.is_directory() {
+                        let fname = entry.name().replace("\\", "/");
+                        let mut buffer = Vec::new();
+                        entry_reader.read_to_end(&mut buffer)?;
+                        new_cache.insert(fname, buffer);
+                    }
+                    Ok(true)
+                })?;
+            }
+            ArchiveInternal::Rar { ref archive_path } => {
+                let mut archive = unrar::Archive::new(archive_path).open_for_processing()?;
+                while let Some(header) = archive.read_header()? {
+                    let filename = header.entry().filename.to_string_lossy().replace("\\", "/");
+                    let (data, next_archive) = header.read()?;
+                    new_cache.insert(filename, data);
+                    archive = next_archive;
+                }
+            }
         }
 
-        let decoded = _decode_image_from_memory(&buffer)?;
+        // キャッシュへ格納
+        let data = new_cache.get(name).ok_or_else(|| format!("File '{}' not found after slurping", name))?.clone();
+        {
+            let mut cache = self.cache.lock().unwrap();
+            *cache = Some(new_cache);
+        }
+
+        println!("[Archive] Slurping complete. Memory items: {}", self.cache.lock().unwrap().as_ref().unwrap().len());
+        let decoded = _decode_image_from_memory(&data)?;
         Ok(decoded)
     }
 }

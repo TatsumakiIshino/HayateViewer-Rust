@@ -93,6 +93,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut settings = Settings::load_or_default(config_path);
     if !std::path::Path::new(config_path).exists() { let _ = settings.save(config_path); }
 
+    // コマンドライン引数のパース
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--threads") {
+        if let Some(val) = args.get(pos + 1) {
+            if let Ok(n) = val.parse::<usize>() {
+                settings.parallel_decoding_workers = n;
+                println!("[設定] スレッド数を引数から {} に設定しました", n);
+            }
+        }
+    }
+
+    // Rayon Global Thread Pool の初期化
+    let num_threads = settings.parallel_decoding_workers;
+    if num_threads > 0 {
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global();
+        println!("[設定] Rayon スレッドプールを {} スレッドで初期化しました", num_threads);
+    }
+
     // Tokio Runtime
     let rt = Runtime::new()?;
     let _guard = rt.enter();
@@ -178,7 +198,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         elwt.set_control_flow(ControlFlow::Wait);
         match event {
             Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
-                WindowEvent::CloseRequested => elwt.exit(),
+                WindowEvent::CloseRequested => {
+                    println!("終了リクエストを受信しました。終了します...");
+                    elwt.exit();
+                    // 非同期タスクがブロッキングしている場合に備え、プロセスを強制終了
+                    std::process::exit(0);
+                }
                 WindowEvent::Resized(physical_size) => {
                     let _ = renderer.resize(physical_size.width, physical_size.height);
                 }
@@ -265,7 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) => {
                             if app_state.is_options_open {
-                                let total_options = 8;
+                                let total_options = 9;
                                 if logical_key == Key::Named(NamedKey::ArrowUp) {
                                     app_state.options_selected_index = (app_state.options_selected_index + total_options - 1) % total_options;
                                 } else {
@@ -314,6 +339,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     7 => {
                                         settings.show_status_bar_info = !settings.show_status_bar_info;
+                                        let _ = settings.save("config.json");
+                                    }
+                                    8 => {
+                                        // デコードスレッド数
+                                        if direction > 0 { settings.parallel_decoding_workers += 1; }
+                                        else { settings.parallel_decoding_workers = settings.parallel_decoding_workers.saturating_sub(1); }
                                         let _ = settings.save("config.json");
                                     }
                                     _ => (),
@@ -869,6 +900,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ("CPU 先読み数", &format!("{} ページ", settings.cpu_max_prefetch_pages)),
                             ("GPU 先読み数", &format!("{} ページ", settings.gpu_max_prefetch_pages)),
                             ("ステータスバー", if settings.show_status_bar_info { "表示" } else { "非表示" }),
+                            ("デコードスレッド数", &format!("{} (要再起動)", settings.parallel_decoding_workers)),
                         ];
 
                         for (i, (label, value)) in options.iter().enumerate() {

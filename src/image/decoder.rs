@@ -44,32 +44,32 @@ fn decode_jp2(data: &[u8]) -> Result<DecodedImage, Box<dyn std::error::Error>> {
         println!("[Decoder] First pixel: {:?}", &img.data[0..3]);
     }
     
-    let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
+    use rayon::prelude::*;
+
+    let mut rgba_data = vec![255u8; (width * height * 4) as usize];
     let pixels = &img.data;
     
     match img.color_space {
         ColorSpace::RGB => {
-            rgba_data.resize((width * height * 4) as usize, 255);
-            for (i, chunk) in pixels.chunks_exact(3).enumerate() {
-                let offset = i * 4;
-                // 一旦、標準的な RGB 順序に戻して挙動を確認
-                rgba_data[offset] = chunk[0];     // R
-                rgba_data[offset + 1] = chunk[1]; // G
-                rgba_data[offset + 2] = chunk[2]; // B
-                // alpha is already 255
-            }
+            rgba_data.par_chunks_exact_mut(4)
+                .zip(pixels.par_chunks_exact(3))
+                .for_each(|(rgba, rgb)| {
+                    rgba[0] = rgb[0];
+                    rgba[1] = rgb[1];
+                    rgba[2] = rgb[2];
+                    // rgba[3] is already 255 from vec! init
+                });
         }
         ColorSpace::Gray => {
-            rgba_data.resize((width * height * 4) as usize, 255);
-            for (i, &p) in pixels.iter().enumerate() {
-                let offset = i * 4;
-                rgba_data[offset] = p;
-                rgba_data[offset + 1] = p;
-                rgba_data[offset + 2] = p;
-            }
+            rgba_data.par_chunks_exact_mut(4)
+                .zip(pixels.par_iter())
+                .for_each(|(rgba, &p)| {
+                    rgba[0] = p;
+                    rgba[1] = p;
+                    rgba[2] = p;
+                });
         }
         _ => {
-            // 他のカラースペースは暫定的に無視するかエラーにする
             return Err(format!("Unsupported color space in JP2: {:?}", img.color_space).into());
         }
     }
