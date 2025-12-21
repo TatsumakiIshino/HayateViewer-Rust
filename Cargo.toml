@@ -1,6 +1,6 @@
 [package]
 name = "hayate-viewer-rust"
-version = "0.2.5"
+version = "0.2.6-test1"
 edition = "2024"
 
 [dependencies]
@@ -19,6 +19,7 @@ natord = "1.0.9"
 sevenz-rust = "0.6.1"
 hayro-jpeg2000 = "0.1.1"
 lru = "0.16.2"
+unrar = "0.5.4"
 
 [profile.dev]
 opt-level = 1

@@ -1028,7 +1028,7 @@ fn get_neighboring_source(current_path: &str, direction: isize) -> Option<String
     let parent = path.parent()?;
     
     let mut entries = Vec::new();
-    let supported_archives = ["zip", "7z", "cbz"];
+    let supported_archives = ["zip", "7z", "cbz", "rar", "cbr"];
     
     if let Ok(dir) = std::fs::read_dir(parent) {
         for entry in dir.flatten() {

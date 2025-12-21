@@ -6,8 +6,9 @@ use crate::image::decoder::{DecodedImage, _decode_image_from_memory};
 pub enum ArchiveInternal {
     Zip(ZipArchive<std::fs::File>),
     SevenZ {
-        temp_dir: std::path::PathBuf,
-        #[allow(dead_code)]
+        archive_path: std::path::PathBuf,
+    },
+    Rar {
         archive_path: std::path::PathBuf,
     },
 }
@@ -45,32 +46,48 @@ impl ArchiveLoader {
                 file_names,
             })
         } else if ext == "7z" {
-            let temp_dir = std::env::temp_dir().join(format!("HayateViewer_Rust_{}", crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC).checksum(path.as_bytes())));
-            if !temp_dir.exists() {
-                std::fs::create_dir_all(&temp_dir)?;
-            }
+            // 7z のファイルリストを取得（高速）
+            println!("[Archive] Listing 7z: {}", path);
+            let mut file_names = Vec::new();
+            let mut reader = sevenz_rust::SevenZReader::open(path_buf.clone(), sevenz_rust::Password::empty())?;
+            reader.for_each_entries(|entry, _| {
+                let name = entry.name().replace("\\", "/");
+                if let Some(ext) = std::path::Path::new(&name).extension().and_then(|s| s.to_str()) {
+                    if supported.contains(&ext.to_lowercase().as_str()) {
+                        file_names.push(name);
+                    }
+                }
+                Ok(true)
+            })?;
             
-            println!("[Archive] Extracting 7z to temp: {} -> {:?}", path, temp_dir);
-            sevenz_rust::decompress_file(path, &temp_dir)?;
-
-            // 展開されたファイルをスキャンして file_names を構築
-            for entry in walkdir::WalkDir::new(&temp_dir) {
-                let entry = entry?;
-                if entry.file_type().is_file() {
-                    let rel_path = entry.path().strip_prefix(&temp_dir)?;
-                    let name = rel_path.to_string_lossy().to_string().replace("\\", "/");
-                    if let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) {
+            file_names.sort_by(|a, b| natord::compare(a, b));
+            Ok(Self {
+                internal: ArchiveInternal::SevenZ {
+                    archive_path: path_buf,
+                },
+                file_names,
+            })
+        } else if ext == "rar" || ext == "cbr" {
+            // unrar クレートを使用してファイルリストを取得（高速）
+            println!("[Archive] Listing RAR: {}", path);
+            let mut file_names = Vec::new();
+            let mut archive = unrar::Archive::new(path).open_for_listing()?;
+            while let Some(header) = archive.read_header()? {
+                let entry = header.entry();
+                if entry.is_file() {
+                    let name = entry.filename.to_string_lossy().replace("\\", "/");
+                    if let Some(ext) = std::path::Path::new(&name).extension().and_then(|s| s.to_str()) {
                         if supported.contains(&ext.to_lowercase().as_str()) {
                             file_names.push(name);
                         }
                     }
                 }
+                archive = header.skip()?;
             }
 
             file_names.sort_by(|a, b| natord::compare(a, b));
             Ok(Self {
-                internal: ArchiveInternal::SevenZ {
-                    temp_dir,
+                internal: ArchiveInternal::Rar {
                     archive_path: path_buf,
                 },
                 file_names,
@@ -93,14 +110,48 @@ impl ArchiveLoader {
                 let mut file = archive.by_name(name)?;
                 file.read_to_end(&mut buffer)?;
             }
-            ArchiveInternal::SevenZ { ref temp_dir, .. } => {
-                let file_path = temp_dir.join(name.replace("/", "\\"));
-                println!("[Archive] Reading from temp: {:?}", file_path);
-                buffer = std::fs::read(&file_path)?;
-                println!("[Archive] Read completed: {}, size={}", name, buffer.len());
+            ArchiveInternal::SevenZ { ref archive_path } => {
+                // 7z から該当ファイルをメモリへ直接展開
+                let mut found = false;
+                sevenz_rust::SevenZReader::open(archive_path, sevenz_rust::Password::empty())?
+                    .for_each_entries(|entry, reader| {
+                        if entry.name().replace("\\", "/") == *name {
+                            reader.read_to_end(&mut buffer)?;
+                            found = true;
+                            return Ok(false); // 目的のファイルが見つかったので中断
+                        }
+                        Ok(true)
+                    })?;
+                if !found {
+                    return Err(format!("File '{}' not found in 7z archive", name).into());
+                }
+            }
+            ArchiveInternal::Rar { ref archive_path } => {
+                // RAR から該当ファイルをメモリへ直接展開（Unidirectional Stream なので該当ファイルまで読み飛ばし）
+                let mut archive = unrar::Archive::new(archive_path).open_for_processing()?;
+                'outer: loop {
+                    match archive.read_header() {
+                        Ok(Some(header)) => {
+                            let filename = header.entry().filename.to_string_lossy().replace("\\", "/");
+                            if filename == *name {
+                                let (data, _next_archive) = header.read()?;
+                                buffer = data;
+                                break 'outer;
+                            } else {
+                                archive = header.skip()?;
+                            }
+                        }
+                        Ok(None) => break 'outer,
+                        Err(e) => return Err(e.into()),
+                    }
+                }
             }
         }
         
+        if buffer.is_empty() {
+            return Err(format!("File '{}' not found in archive", name).into());
+        }
+
         let decoded = _decode_image_from_memory(&buffer)?;
         Ok(decoded)
     }
@@ -108,9 +159,6 @@ impl ArchiveLoader {
 
 impl Drop for ArchiveLoader {
     fn drop(&mut self) {
-        if let ArchiveInternal::SevenZ { ref temp_dir, .. } = self.internal {
-            println!("[Archive] Cleaning up temp dir: {:?}", temp_dir);
-            let _ = std::fs::remove_dir_all(temp_dir);
-        }
+        // 一時ディレクトリを使用しなくなったため、何もしない
     }
 }
