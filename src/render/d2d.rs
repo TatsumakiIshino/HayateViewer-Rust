@@ -11,8 +11,12 @@ pub trait Renderer {
     fn end_draw(&self) -> Result<()>;
     fn draw_bitmap(&self, bitmap: &ID2D1Bitmap1, dest_rect: &D2D_RECT_F);
     fn fill_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F);
+    fn fill_rounded_rectangle(&self, rect: &D2D_RECT_F, radius: f32, color: &D2D1_COLOR_F);
+    fn draw_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, stroke_width: f32);
     fn draw_text(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F);
+    fn draw_text_large(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F);
     fn set_interpolation_mode(&mut self, mode: D2D1_INTERPOLATION_MODE);
+    fn set_text_alignment(&self, alignment: DWRITE_TEXT_ALIGNMENT);
 }
 
 pub struct D2DRenderer {
@@ -22,6 +26,7 @@ pub struct D2DRenderer {
     pub swap_chain: IDXGISwapChain1,
     pub dw_factory: IDWriteFactory,
     pub text_format: IDWriteTextFormat,
+    pub text_format_large: IDWriteTextFormat,
     pub brush: ID2D1SolidColorBrush,
     pub interpolation_mode: D2D1_INTERPOLATION_MODE,
 }
@@ -72,6 +77,25 @@ impl Renderer for D2DRenderer {
         }
     }
 
+    fn fill_rounded_rectangle(&self, rect: &D2D_RECT_F, radius: f32, color: &D2D1_COLOR_F) {
+        unsafe {
+            self.brush.SetColor(color);
+            let rounded = D2D1_ROUNDED_RECT {
+                rect: *rect,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            self.context.FillRoundedRectangle(&rounded, &self.brush);
+        }
+    }
+
+    fn draw_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, stroke_width: f32) {
+        unsafe {
+            self.brush.SetColor(color);
+            self.context.DrawRectangle(rect, &self.brush, stroke_width, None);
+        }
+    }
+
     fn draw_text(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F) {
         unsafe {
             self.brush.SetColor(color);
@@ -87,8 +111,32 @@ impl Renderer for D2DRenderer {
         }
     }
 
+    fn draw_text_large(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F) {
+        unsafe {
+            self.brush.SetColor(color);
+            let wide_text: Vec<u16> = text.encode_utf16().collect();
+            self.context.DrawText(
+                &wide_text,
+                &self.text_format_large,
+                rect,
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+
     fn set_interpolation_mode(&mut self, mode: D2D1_INTERPOLATION_MODE) {
         self.interpolation_mode = mode;
+    }
+
+    fn set_text_alignment(&self, alignment: DWRITE_TEXT_ALIGNMENT) {
+        unsafe {
+            let _ = self.text_format.SetTextAlignment(alignment);
+            let _ = self.text_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let _ = self.text_format_large.SetTextAlignment(alignment);
+            let _ = self.text_format_large.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
     }
 }
 
@@ -151,6 +199,16 @@ impl D2DRenderer {
                 w!("ja-jp"),
             )?;
 
+            let text_format_large = dw_factory.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                24.0,
+                w!("ja-jp"),
+            )?;
+
             let brush = context.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?;
 
             Ok(Self {
@@ -160,6 +218,7 @@ impl D2DRenderer {
                 swap_chain,
                 dw_factory,
                 text_format,
+                text_format_large,
                 brush,
                 interpolation_mode: D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
             })

@@ -16,11 +16,14 @@ use std::sync::Arc;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
+use windows::Win32::Graphics::DirectWrite::{
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+};
 use winit::{
     event::{Event, WindowEvent, ElementState, MouseButton, MouseScrollDelta, KeyEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
     window::WindowBuilder,
-    keyboard::{PhysicalKey, KeyCode, ModifiersState},
+    keyboard::{PhysicalKey, KeyCode, ModifiersState, Key, NamedKey},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::platform::windows::WindowBuilderExtWindows;
@@ -206,8 +209,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 WindowEvent::ModifiersChanged(new_modifiers) => {
                     modifiers = new_modifiers.state();
                 }
-                WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, .. }, .. } => {
+                WindowEvent::KeyboardInput { event: KeyEvent { logical_key, physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, .. }, .. } => {
+                    if app_state.is_jump_open {
+                        match logical_key {
+                            Key::Character(s) if s.chars().all(|c| c.is_ascii_digit()) => {
+                                if app_state.jump_input_buffer.len() < 5 {
+                                    app_state.jump_input_buffer.push_str(s.as_str());
+                                }
+                            }
+                            Key::Named(NamedKey::Backspace) => {
+                                app_state.jump_input_buffer.pop();
+                            }
+                            Key::Named(NamedKey::Enter) => {
+                                if let Ok(page_num) = app_state.jump_input_buffer.parse::<usize>() {
+                                    if page_num > 0 && page_num <= app_state.image_files.len() {
+                                        app_state.current_page_index = page_num - 1;
+                                        view_state.reset();
+                                        request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                                    }
+                                }
+                                app_state.is_jump_open = false;
+                                app_state.jump_input_buffer.clear();
+                            }
+                            Key::Named(NamedKey::Escape) => {
+                                app_state.is_jump_open = false;
+                                app_state.jump_input_buffer.clear();
+                            }
+                            _ => (),
+                        }
+                        window.request_redraw();
+                        return;
+                    }
+
                     match code {
+                        KeyCode::KeyS => {
+                            if modifiers.shift_key() {
+                                // Shift + S: ページジャンプを開く
+                                app_state.is_jump_open = true;
+                                app_state.jump_input_buffer.clear();
+                                app_state.is_options_open = false;
+                            } else {
+                                // S: シークバー切り替え
+                                app_state.show_seekbar = !app_state.show_seekbar;
+                            }
+                            window.request_redraw();
+                        }
                         KeyCode::ArrowUp | KeyCode::ArrowDown => {
                             if app_state.is_options_open {
                                 let total_options = 7;
@@ -306,6 +352,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     let pos = (position.x as f32, position.y as f32);
+                    let window_size = window.inner_size();
+                    let win_w = window_size.width as f32;
+
+                    // シークバーのドラッグ処理
+                    if app_state.is_dragging_seekbar && !app_state.image_files.is_empty() {
+                        let progress = (pos.0 / win_w).clamp(0.0, 1.0);
+                        let total_pages = app_state.image_files.len();
+                        let target_progress = if app_state.binding_direction == BindingDirection::Right {
+                            1.0 - progress
+                        } else {
+                            progress
+                        };
+                        let idx = (target_progress * (total_pages - 1) as f32).round() as usize;
+                        let new_idx = app_state.snap_to_spread(idx);
+                        if new_idx != app_state.current_page_index {
+                            app_state.current_page_index = new_idx;
+                            view_state.reset();
+                            request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                        }
+                    }
+
                     if view_state.is_panning || view_state.is_loupe {
                         view_state.pan_offset.0 += pos.0 - view_state.last_mouse_pos.0;
                         view_state.pan_offset.1 += pos.1 - view_state.last_mouse_pos.1;
@@ -318,11 +385,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match button {
                         MouseButton::Left => {
                             if state == ElementState::Pressed {
-                                if view_state.zoom_level > 1.0 {
+                                let window_size = window.inner_size();
+                                let win_h = window_size.height as f32;
+                                let bar_h = 25.0;
+                                let seek_bar_h = 8.0;
+                                let bar_y = if settings.show_status_bar_info { win_h - bar_h - seek_bar_h } else { win_h - seek_bar_h };
+
+                                // シークバークリック判定
+                                if app_state.show_seekbar && view_state.cursor_pos.1 >= bar_y && view_state.cursor_pos.1 <= bar_y + seek_bar_h {
+                                    app_state.is_dragging_seekbar = true;
+                                    // 即座に位置を反映させるために CursorMoved と同じロジックを実行
+                                    let win_w = window_size.width as f32;
+                                    let progress = (view_state.cursor_pos.0 / win_w).clamp(0.0, 1.0);
+                                    let total_pages = app_state.image_files.len();
+                                    if total_pages > 0 {
+                                        let target_progress = if app_state.binding_direction == BindingDirection::Right {
+                                            1.0 - progress
+                                        } else {
+                                            progress
+                                        };
+                                        let idx = (target_progress * (total_pages - 1) as f32).round() as usize;
+                                        app_state.current_page_index = app_state.snap_to_spread(idx);
+                                        view_state.reset();
+                                        request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                                    }
+                                } else if view_state.zoom_level > 1.0 {
                                     view_state.is_panning = true;
                                 }
                             } else {
                                 view_state.is_panning = false;
+                                app_state.is_dragging_seekbar = false;
                             }
                         }
                         MouseButton::Right => {
@@ -477,6 +569,93 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     update_window_title(&window, &current_path_key, &app_state);
+
+                    // ページジャンプオーバーレイの描画
+                    if app_state.is_jump_open {
+                        let jump_w = 340.0;
+                        let jump_h = 160.0;
+                        let jump_rect = D2D_RECT_F {
+                            left: (win_w - jump_w) / 2.0,
+                            top: (win_h - jump_h) / 2.0,
+                            right: (win_w + jump_w) / 2.0,
+                            bottom: (win_h + jump_h) / 2.0,
+                        };
+                        
+                        // メインパネル
+                        renderer.fill_rounded_rectangle(&jump_rect, 12.0, &D2D1_COLOR_F { r: 0.05, g: 0.05, b: 0.05, a: 0.95 });
+                        renderer.draw_rectangle(&jump_rect, &D2D1_COLOR_F { r: 0.3, g: 0.3, b: 0.3, a: 1.0 }, 1.0);
+
+                        renderer.set_text_alignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                        
+                        // タイトルラベル
+                        let mut title_rect = jump_rect.clone();
+                        title_rect.top += 15.0;
+                        title_rect.bottom = title_rect.top + 30.0;
+                        renderer.draw_text("ページ指定 (Enterで確定)", &title_rect, &D2D1_COLOR_F { r: 0.6, g: 0.6, b: 0.6, a: 1.0 });
+
+                        // 入力エリア背景（サブパネル）
+                        let input_bg_w = 280.0;
+                        let input_bg_h = 60.0;
+                        let input_bg_rect = D2D_RECT_F {
+                            left: (win_w - input_bg_w) / 2.0,
+                            top: jump_rect.top + 55.0,
+                            right: (win_w + input_bg_w) / 2.0,
+                            bottom: jump_rect.top + 55.0 + input_bg_h,
+                        };
+                        renderer.fill_rounded_rectangle(&input_bg_rect, 6.0, &D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.6 });
+
+                        // 入力中の文字と合計を一つの文字列として中央揃えで描画
+                        let input_val = if app_state.jump_input_buffer.is_empty() { "---" } else { &app_state.jump_input_buffer };
+                        let cursor = if (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() / 500) % 2 == 0 { "|" } else { " " };
+                        
+                        // カーソルを入力値の直後に表示したいため、文字列を工夫
+                        let full_text = if app_state.jump_input_buffer.is_empty() {
+                            format!("{} / {}", input_val, total_pages) // 空の時はカーソル無しでも良いが、一応
+                        } else {
+                            format!("{}{} / {}", app_state.jump_input_buffer, cursor, total_pages)
+                        };
+
+                        renderer.set_text_alignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                        renderer.draw_text_large(&full_text, &input_bg_rect, &D2D1_COLOR_F { r: 1.0, g: 0.8, b: 0.0, a: 1.0 });
+
+                        renderer.set_text_alignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                    }
+
+                    // シークバーの描画
+                    if app_state.show_seekbar && total_pages > 0 {
+                        let bar_height = if app_state.is_dragging_seekbar { 12.0 } else { 8.0 };
+                        let bar_y = if settings.show_status_bar_info { win_h - bar_h - bar_height } else { win_h - bar_height };
+                        let full_rect = D2D_RECT_F {
+                            left: 0.0,
+                            top: bar_y,
+                            right: win_w,
+                            bottom: bar_y + bar_height,
+                        };
+                        renderer.fill_rectangle(&full_rect, &D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.5 });
+
+                        let progress = (app_state.current_page_index as f32) / ((total_pages - 1) as f32).max(1.0);
+                        let progress_rect = if app_state.binding_direction == BindingDirection::Right {
+                            D2D_RECT_F {
+                                left: win_w * (1.0 - progress),
+                                top: bar_y,
+                                right: win_w,
+                                bottom: bar_y + bar_height,
+                            }
+                        } else {
+                            D2D_RECT_F {
+                                left: 0.0,
+                                top: bar_y,
+                                right: win_w * progress,
+                                bottom: bar_y + bar_height,
+                            }
+                        };
+                        let bar_color = if app_state.is_dragging_seekbar {
+                            D2D1_COLOR_F { r: 0.0, g: 0.6, b: 1.0, a: 1.0 }
+                        } else {
+                            D2D1_COLOR_F { r: 0.0, g: 0.4, b: 0.8, a: 0.9 }
+                        };
+                        renderer.fill_rounded_rectangle(&progress_rect, 4.0, &bar_color);
+                    }
 
                     // 設定オーバーレイの描画
                     if app_state.is_options_open {
