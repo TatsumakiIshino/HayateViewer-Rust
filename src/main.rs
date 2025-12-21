@@ -386,12 +386,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         _ => {
-                            if let PhysicalKey::Code(code) = physical_key {
-                                match code {
-                                    KeyCode::NumpadMultiply => {
-                                        view_state.reset();
+                            match logical_key {
+                                Key::Character(ref s) if s == "+" || s == ";" => { // ";" は JP キーボードの "+"
+                                    let window_size = window.inner_size();
+                                    let win_size = (window_size.width as f32, window_size.height as f32);
+                                    let center = (win_size.0 / 2.0, win_size.1 / 2.0);
+                                    view_state.set_zoom(view_state.zoom_level * 1.15, center, win_size);
+                                }
+                                Key::Character(ref s) if s == "-" => {
+                                    let window_size = window.inner_size();
+                                    let win_size = (window_size.width as f32, window_size.height as f32);
+                                    let center = (win_size.0 / 2.0, win_size.1 / 2.0);
+                                    view_state.set_zoom(view_state.zoom_level / 1.15, center, win_size);
+                                }
+                                _ => {
+                                    if let PhysicalKey::Code(code) = physical_key {
+                                        match code {
+                                            KeyCode::NumpadAdd => {
+                                                let window_size = window.inner_size();
+                                                let win_size = (window_size.width as f32, window_size.height as f32);
+                                                let center = (win_size.0 / 2.0, win_size.1 / 2.0);
+                                                view_state.set_zoom(view_state.zoom_level * 1.15, center, win_size);
+                                            }
+                                            KeyCode::NumpadSubtract => {
+                                                let window_size = window.inner_size();
+                                                let win_size = (window_size.width as f32, window_size.height as f32);
+                                                let center = (win_size.0 / 2.0, win_size.1 / 2.0);
+                                                view_state.set_zoom(view_state.zoom_level / 1.15, center, win_size);
+                                            }
+                                            KeyCode::NumpadMultiply => {
+                                                view_state.reset();
+                                            }
+                                            _ => (),
+                                        }
                                     }
-                                    _ => (),
                                 }
                             }
                         }
@@ -496,13 +524,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         MouseScrollDelta::PixelDelta(pos) => (pos.y / 120.0) as f32,
                     };
                     
-                    if scroll.abs() > 0.1 {
-                        let direction = if scroll > 0.0 { -1 } else { 1 };
-                        app_state.navigate(direction);
-                        let l = loader.clone();
-                        rt.spawn(async move { let _ = l.send_request(LoaderRequest::ClearPrefetch).await; });
-                        view_state.reset();
-                        request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                    if scroll.abs() > 0.01 {
+                        if modifiers.control_key() {
+                            // Ctrl + Wheel: ズーム
+                            let factor = if scroll > 0.0 { 1.15 } else { 1.0 / 1.15 };
+                            let window_size = window.inner_size();
+                            let win_size = (window_size.width as f32, window_size.height as f32);
+                            view_state.set_zoom(view_state.zoom_level * factor, view_state.cursor_pos, win_size);
+                        } else {
+                            // 通常の Wheel: ページ移動
+                            let direction = if scroll > 0.0 { -1 } else { 1 };
+                            app_state.navigate(direction);
+                            let l = loader.clone();
+                            rt.spawn(async move { let _ = l.send_request(LoaderRequest::ClearPrefetch).await; });
+                            view_state.reset();
+                            request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                        }
                         window.request_redraw();
                     }
                 }
