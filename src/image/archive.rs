@@ -24,7 +24,7 @@ impl ArchiveLoader {
         let mut file_names = Vec::new();
         let supported = ["jpg", "jpeg", "png", "webp", "bmp", "jp2"];
 
-        if ext == "zip" {
+        if ext == "zip" || ext == "cbz" {
             let file = std::fs::File::open(path)?;
             let mut archive = ZipArchive::new(file)?;
             for i in 0..archive.len() {

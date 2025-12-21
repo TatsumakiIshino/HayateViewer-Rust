@@ -209,10 +209,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 WindowEvent::ModifiersChanged(new_modifiers) => {
                     modifiers = new_modifiers.state();
                 }
-                WindowEvent::KeyboardInput { event: KeyEvent { logical_key, physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, .. }, .. } => {
+                WindowEvent::KeyboardInput { 
+                    event: KeyEvent { 
+                        logical_key, 
+                        physical_key,
+                        state: ElementState::Pressed, 
+                        .. 
+                    }, .. 
+                } => {
                     if app_state.is_jump_open {
                         match logical_key {
-                            Key::Character(s) if s.chars().all(|c| c.is_ascii_digit()) => {
+                            Key::Character(ref s) if s.chars().all(|c| c.is_ascii_digit()) => {
                                 if app_state.jump_input_buffer.len() < 5 {
                                     app_state.jump_input_buffer.push_str(s.as_str());
                                 }
@@ -241,8 +248,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
 
-                    match code {
-                        KeyCode::KeyS => {
+                    match logical_key {
+                        Key::Character(ref s) if s.to_lowercase() == "s" => {
                             if modifiers.shift_key() {
                                 // Shift + S: ページジャンプを開く
                                 app_state.is_jump_open = true;
@@ -254,19 +261,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             window.request_redraw();
                         }
-                        KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                        Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) => {
                             if app_state.is_options_open {
                                 let total_options = 7;
-                                if code == KeyCode::ArrowUp {
+                                if logical_key == Key::Named(NamedKey::ArrowUp) {
                                     app_state.options_selected_index = (app_state.options_selected_index + total_options - 1) % total_options;
                                 } else {
                                     app_state.options_selected_index = (app_state.options_selected_index + 1) % total_options;
                                 }
                             }
                         }
-                        KeyCode::ArrowRight | KeyCode::ArrowLeft => {
+                        Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowLeft) => {
                             if app_state.is_options_open {
-                                let direction = if code == KeyCode::ArrowRight { 1 } else { -1 };
+                                let direction = if logical_key == Key::Named(NamedKey::ArrowRight) { 1 } else { -1 };
                                 match app_state.options_selected_index {
                                     1 => app_state.is_spread_view = !app_state.is_spread_view,
                                     2 => app_state.binding_direction = if app_state.binding_direction == BindingDirection::Left { BindingDirection::Right } else { BindingDirection::Left },
@@ -306,7 +313,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             } else {
                                 // ページ移動
-                                let direction = if code == KeyCode::ArrowRight { 1 } else { -1 };
+                                let direction = if logical_key == Key::Named(NamedKey::ArrowRight) { 1 } else { -1 };
                                 if modifiers.shift_key() {
                                     app_state.navigate(direction * 10);
                                 } else if modifiers.control_key() {
@@ -319,7 +326,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                             }
                         }
-                        KeyCode::KeyB => {
+                        Key::Character(ref s) if s.to_lowercase() == "b" => {
                             if !app_state.is_options_open {
                                 if !app_state.is_spread_view {
                                     app_state.is_spread_view = true;
@@ -333,20 +340,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                             }
                         }
-                        KeyCode::NumpadMultiply => {
-                            view_state.reset();
-                        }
-                        KeyCode::KeyO => {
+                        Key::Character(ref s) if s.to_lowercase() == "o" => {
                             app_state.is_options_open = !app_state.is_options_open;
                             window.request_redraw();
                         }
-                        KeyCode::Escape => {
+                        Key::Character(ref s) if s == "[" || s == "]" => {
+                            if !app_state.is_options_open && !app_state.is_jump_open {
+                                let direction = if s == "]" { 1 } else { -1 };
+                                if let Some(new_path) = get_neighboring_source(&current_path_key, direction) {
+                                    println!("Navigating to folder: {}", new_path);
+                                    if let Some(new_source) = get_image_source(&new_path) {
+                                        if let ImageSource::Files(ref files) = new_source {
+                                            app_state.image_files = files.clone();
+                                        } else if let ImageSource::Archive(ref loader) = new_source {
+                                            app_state.image_files = loader.get_file_names().to_vec();
+                                        }
+                                        app_state.current_page_index = 0;
+                                        current_bitmaps.clear();
+                                        current_path_key = new_path.clone();
+                                        update_window_title(&window, &current_path_key, &app_state);
+                                        
+                                        rt.block_on(loader.send_request(LoaderRequest::Clear));
+                                        rt.block_on(loader.send_request(LoaderRequest::SetSource { 
+                                            source: new_source, 
+                                            path_key: new_path 
+                                        }));
+                                        request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                                    }
+                                }
+                            }
+                        }
+                        Key::Named(NamedKey::Escape) => {
                             if app_state.is_options_open {
                                 app_state.is_options_open = false;
                                 window.request_redraw();
                             }
                         }
-                        _ => (),
+                        _ => {
+                            if let PhysicalKey::Code(code) = physical_key {
+                                match code {
+                                    KeyCode::NumpadMultiply => {
+                                        view_state.reset();
+                                    }
+                                    _ => (),
+                                }
+                            }
+                        }
                     }
                     window.request_redraw();
                 }
@@ -850,4 +889,43 @@ fn format_page_list(indices: &[usize]) -> String {
     } else {
         format!("{:?}", sorted.iter().map(|i| i + 1).collect::<Vec<_>>())
     }
+}
+
+fn get_neighboring_source(current_path: &str, direction: isize) -> Option<String> {
+    let path = std::path::Path::new(current_path);
+    let parent = path.parent()?;
+    
+    let mut entries = Vec::new();
+    let supported_archives = ["zip", "7z", "cbz"];
+    
+    if let Ok(dir) = std::fs::read_dir(parent) {
+        for entry in dir.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                entries.push(p);
+            } else if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                if supported_archives.contains(&ext.to_lowercase().as_str()) {
+                    entries.push(p);
+                }
+            }
+        }
+    }
+    
+    if entries.is_empty() { return None; }
+    
+    entries.sort_by(|a, b| natord::compare(&a.to_string_lossy(), &b.to_string_lossy()));
+    
+    let current_abs = std::fs::canonicalize(path).ok()?;
+    let current_idx = entries.iter().position(|e| {
+        std::fs::canonicalize(e).map(|abs| abs == current_abs).unwrap_or(false)
+    });
+
+    if let Some(idx) = current_idx {
+        let next_idx = idx as isize + direction;
+        if next_idx >= 0 && next_idx < entries.len() as isize {
+            return Some(entries[next_idx as usize].to_string_lossy().to_string());
+        }
+    }
+    
+    None
 }
