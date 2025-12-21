@@ -7,15 +7,15 @@ mod state;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use crate::config::Settings;
-use crate::render::d2d::{D2DRenderer, Renderer};
+use crate::render::{Renderer, InterpolationMode};
+use crate::render::d2d::D2DRenderer;
 use crate::image::{get_image_source, ImageSource};
 use crate::image::cache::{create_shared_cache, SharedImageCache};
 use crate::image::loader::{AsyncLoader, LoaderRequest, UserEvent};
 use crate::state::{AppState, BindingDirection};
 use std::sync::Arc;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
-use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
+use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F, D2D_SIZE_F};
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
 };
@@ -156,17 +156,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let loader = AsyncLoader::new(cpu_cache.clone(), proxy);
 
     {
-        use windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC;
-        use windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR;
-        use windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR;
-        use windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_CUBIC;
 
         let mode = match settings.resampling_mode_dx.as_str() {
-            "DX_NEAREST" => D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-            "DX_LINEAR" => D2D1_INTERPOLATION_MODE_LINEAR,
-            "DX_CUBIC" => D2D1_INTERPOLATION_MODE_CUBIC,
-            "DX_HQC" => D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-            _ => D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+            "DX_NEAREST" => InterpolationMode::NearestNeighbor,
+            "DX_LINEAR" => InterpolationMode::Linear,
+            "DX_CUBIC" => InterpolationMode::Cubic,
+            "DX_HQC" => InterpolationMode::HighQualityCubic,
+            _ => InterpolationMode::HighQualityCubic,
         };
         renderer.set_interpolation_mode(mode);
     }
@@ -191,7 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut current_bitmaps: Vec<(usize, ID2D1Bitmap1)> = Vec::new();
+    let mut current_bitmaps: Vec<(usize, crate::render::TextureHandle)> = Vec::new();
     let mut modifiers = ModifiersState::default();
 
     event_loop.run(move |event: Event<UserEvent>, elwt| {
@@ -312,14 +308,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         settings.resampling_mode_dx = modes[new_idx].to_string();
                                         
                                         // レンダラーに即時反映
-                                        use windows::Win32::Graphics::Direct2D::*;
-                                        let d2d_mode = match modes[new_idx] {
-                                            "DX_NEAREST" => D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-                                            "DX_LINEAR" => D2D1_INTERPOLATION_MODE_LINEAR,
-                                            "DX_CUBIC" => D2D1_INTERPOLATION_MODE_CUBIC,
-                                            _ => D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                                        let new_mode = match modes[new_idx] {
+                                            "DX_NEAREST" => InterpolationMode::NearestNeighbor,
+                                            "DX_LINEAR" => InterpolationMode::Linear,
+                                            "DX_CUBIC" => InterpolationMode::Cubic,
+                                            _ => InterpolationMode::HighQualityCubic,
                                         };
-                                        renderer.set_interpolation_mode(d2d_mode);
+                                        renderer.set_interpolation_mode(new_mode);
                                         let _ = settings.save("config.json");
                                     }
                                     4 => {
@@ -624,8 +619,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if !current_bitmaps.iter().any(|(i, _)| *i == idx) {
                                 let key = format!("{}::{}", current_path_key, idx);
                                 if let Some(decoded) = cache.get(&key) {
-                                    if let Ok(bitmap) = renderer.create_bitmap(decoded.width, decoded.height, &decoded.data) {
-                                        current_bitmaps.push((idx, bitmap));
+                                    if let Ok(texture) = renderer.upload_image(&decoded) {
+                                        current_bitmaps.push((idx, texture));
                                     }
                                 }
                             }
@@ -643,7 +638,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     if !indices.is_empty() {
-                        unsafe {
+                        {
                             // 見開き表示で画像が1枚足りない場合でも、2枚分の枠を確保してレイアウトが崩れないようにする
                             let mut images_info = Vec::new();
                             let mut total_content_w = 0.0;
@@ -651,10 +646,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             
                             for &idx in &indices {
                                 if let Some((_, bmp)) = current_bitmaps.iter().find(|(i, _)| *i == idx) {
-                                    let size = bmp.GetSize();
+                                    let (w, h) = renderer.get_texture_size(bmp);
+                                    let size = D2D_SIZE_F { width: w, height: h };
                                     images_info.push((idx, Some((bmp, size))));
-                                    total_content_w += size.width;
-                                    if size.height > max_content_h { max_content_h = size.height; }
+                                    total_content_w += w;
+                                    if h > max_content_h { max_content_h = h; }
                                 } else {
                                     // 未ロードのページも枠を確保
                                     images_info.push((idx, None));
@@ -712,7 +708,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             right: x + w,
                                             bottom: y + h,
                                         };
-                                        renderer.draw_bitmap(bmp, &dest_rect);
+                                        renderer.draw_image(bmp, &dest_rect);
                                     } else {
                                         // ロード中表示
                                         let text = format!("Loading Page {}...", idx + 1);
@@ -725,7 +721,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         renderer.draw_text(
                                             &text,
                                             &text_rect,
-                                            &D2D1_COLOR_F { r: 0.6, g: 0.6, b: 0.6, a: 1.0 }
+                                            &D2D1_COLOR_F { r: 0.6, g: 0.6, b: 0.6, a: 1.0 },
+                                            false
                                         );
                                     }
                                     current_x += w_step;
@@ -774,7 +771,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         path_preview
                     );
                     if settings.show_status_bar_info {
-                        renderer.draw_text(&status_text, &bar_rect, &D2D1_COLOR_F { r: 0.9, g: 0.9, b: 0.9, a: 1.0 });
+                        renderer.draw_text(&status_text, &bar_rect, &D2D1_COLOR_F { r: 0.9, g: 0.9, b: 0.9, a: 1.0 }, false);
                     }
 
                     update_window_title(&window, &current_path_key, &app_state);
@@ -800,7 +797,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut title_rect = jump_rect.clone();
                         title_rect.top += 15.0;
                         title_rect.bottom = title_rect.top + 30.0;
-                        renderer.draw_text("ページ指定 (Enterで確定)", &title_rect, &D2D1_COLOR_F { r: 0.6, g: 0.6, b: 0.6, a: 1.0 });
+                        renderer.draw_text("ページ指定 (Enterで確定)", &title_rect, &D2D1_COLOR_F { r: 0.6, g: 0.6, b: 0.6, a: 1.0 }, false);
 
                         // 入力エリア背景（サブパネル）
                         let input_bg_w = 280.0;
@@ -825,7 +822,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
 
                         renderer.set_text_alignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                        renderer.draw_text_large(&full_text, &input_bg_rect, &D2D1_COLOR_F { r: 1.0, g: 0.8, b: 0.0, a: 1.0 });
+                        renderer.draw_text(&full_text, &input_bg_rect, &D2D1_COLOR_F { r: 1.0, g: 0.8, b: 0.0, a: 1.0 }, true);
 
                         renderer.set_text_alignment(DWRITE_TEXT_ALIGNMENT_LEADING);
                     }
@@ -887,7 +884,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             bottom: overlay_rect.top + 50.0,
                         };
 
-                        renderer.draw_text("--- 設定 ---", &text_rect, &D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+                        renderer.draw_text("--- 設定 ---", &text_rect, &D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, false);
                         text_rect.top += 40.0;
                         text_rect.bottom += 40.0;
 
@@ -922,7 +919,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             let display_text = format!("{}: {}", label, value);
-                            renderer.draw_text(&display_text, &text_rect, &color);
+                            renderer.draw_text(&display_text, &text_rect, &color, false);
                             
                             text_rect.top += 35.0;
                             text_rect.bottom += 35.0;
@@ -934,7 +931,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             right: overlay_rect.right - 20.0,
                             bottom: overlay_rect.bottom - 10.0,
                         };
-                        renderer.draw_text("矢印キーで変更、'O'キーで閉じる", &hint_rect, &D2D1_COLOR_F { r: 0.5, g: 0.5, b: 0.5, a: 1.0 });
+                        renderer.draw_text("矢印キーで変更、'O'キーで閉じる", &hint_rect, &D2D1_COLOR_F { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }, false);
                     }
 
                     let _ = renderer.end_draw();

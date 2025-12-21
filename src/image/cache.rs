@@ -5,15 +5,35 @@ use std::collections::HashSet;
 
 pub type CacheKey = String;
 
+#[derive(Clone, Debug)]
+pub enum PixelData {
+    Rgba8(Vec<u8>),
+    Ycbcr {
+        planes: Vec<Vec<i32>>, // Y, Cb, Cr
+        subsampling: (u8, u8), // (dx, dy)
+        precision: u8,         // bit深度
+        is_signed: bool,       // 符号付きか (hayro は signed)
+    },
+}
+
+impl PixelData {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Rgba8(data) => data.len(),
+            Self::Ycbcr { planes, .. } => planes.iter().map(|p| p.len() * 4).sum(),
+        }
+    }
+}
+
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>, // RGBA8 形式
+    pub pixel_data: PixelData,
 }
 
 impl DecodedImage {
     pub fn memory_size(&self) -> usize {
-        self.data.len()
+        self.pixel_data.len()
     }
 }
 

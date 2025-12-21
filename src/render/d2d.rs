@@ -4,20 +4,12 @@ use windows::{
     Win32::Graphics::Direct3D::*, Win32::Graphics::Direct3D11::*, Win32::Graphics::Dxgi::Common::*,
     Win32::Graphics::Dxgi::*, Win32::Graphics::DirectWrite::*,
 };
+type D3DResult<T> = windows::core::Result<T>;
 
-pub trait Renderer {
-    fn resize(&self, width: u32, height: u32) -> Result<()>;
-    fn begin_draw(&self);
-    fn end_draw(&self) -> Result<()>;
-    fn draw_bitmap(&self, bitmap: &ID2D1Bitmap1, dest_rect: &D2D_RECT_F);
-    fn fill_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F);
-    fn fill_rounded_rectangle(&self, rect: &D2D_RECT_F, radius: f32, color: &D2D1_COLOR_F);
-    fn draw_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, stroke_width: f32);
-    fn draw_text(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F);
-    fn draw_text_large(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F);
-    fn set_interpolation_mode(&mut self, mode: D2D1_INTERPOLATION_MODE);
-    fn set_text_alignment(&self, alignment: DWRITE_TEXT_ALIGNMENT);
-}
+use crate::image::cache::{DecodedImage, PixelData};
+use super::{Renderer, TextureHandle, InterpolationMode};
+
+// 旧トレイト定義は削除
 
 pub struct D2DRenderer {
     pub _factory: ID2D1Factory1,
@@ -33,15 +25,16 @@ pub struct D2DRenderer {
 }
 
 impl Renderer for D2DRenderer {
-    fn resize(&self, width: u32, height: u32) -> Result<()> {
-        unsafe {
+    fn resize(&self, width: u32, height: u32) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let res: windows::core::Result<()> = unsafe {
             self.context.SetTarget(None);
             self.swap_chain.ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0))?;
             let surface: IDXGISurface = self.swap_chain.GetBuffer(0)?;
             let back_buffer: ID2D1Bitmap1 = self.context.CreateBitmapFromDxgiSurface(&surface, None)?;
             self.context.SetTarget(&back_buffer);
             Ok(())
-        }
+        };
+        res.map_err(|e| e.into())
     }
 
     fn begin_draw(&self) {
@@ -51,14 +44,28 @@ impl Renderer for D2DRenderer {
         }
     }
 
-    fn end_draw(&self) -> Result<()> {
-        unsafe {
+    fn end_draw(&self) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let res: D3DResult<()> = unsafe {
             self.context.EndDraw(None, None)?;
             self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()
+        };
+        res.map_err(|e| e.into())
+    }
+
+    fn upload_image(&self, image: &DecodedImage) -> std::result::Result<TextureHandle, Box<dyn std::error::Error>> {
+        match image.pixel_data {
+            PixelData::Rgba8(ref data) => {
+                let bitmap: ID2D1Bitmap1 = self.create_bitmap(image.width, image.height, data).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                Ok(TextureHandle::Direct2D(bitmap))
+            }
+            PixelData::Ycbcr { .. } => {
+                Err("YCbCr upload not yet implemented for D2D".into())
+            }
         }
     }
 
-    fn draw_bitmap(&self, bitmap: &ID2D1Bitmap1, dest_rect: &D2D_RECT_F) {
+    fn draw_image(&self, texture: &TextureHandle, dest_rect: &D2D_RECT_F) {
+        let TextureHandle::Direct2D(bitmap) = texture;
         unsafe {
             self.context.DrawBitmap(
                 bitmap,
@@ -68,6 +75,14 @@ impl Renderer for D2DRenderer {
                 None,
                 None,
             );
+        }
+    }
+
+    fn get_texture_size(&self, texture: &TextureHandle) -> (f32, f32) {
+        let TextureHandle::Direct2D(bitmap) = texture;
+        unsafe {
+            let size = bitmap.GetSize();
+            (size.width, size.height)
         }
     }
 
@@ -97,13 +112,14 @@ impl Renderer for D2DRenderer {
         }
     }
 
-    fn draw_text(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F) {
+    fn draw_text(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, large: bool) {
         unsafe {
             self.brush.SetColor(color);
             let wide_text: Vec<u16> = text.encode_utf16().collect();
+            let format = if large { &self.text_format_large } else { &self.text_format };
             self.context.DrawText(
                 &wide_text,
-                &self.text_format,
+                format,
                 rect,
                 &self.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -112,23 +128,13 @@ impl Renderer for D2DRenderer {
         }
     }
 
-    fn draw_text_large(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F) {
-        unsafe {
-            self.brush.SetColor(color);
-            let wide_text: Vec<u16> = text.encode_utf16().collect();
-            self.context.DrawText(
-                &wide_text,
-                &self.text_format_large,
-                rect,
-                &self.brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-        }
-    }
-
-    fn set_interpolation_mode(&mut self, mode: D2D1_INTERPOLATION_MODE) {
-        self.interpolation_mode = mode;
+    fn set_interpolation_mode(&mut self, mode: InterpolationMode) {
+        self.interpolation_mode = match mode {
+            InterpolationMode::NearestNeighbor => D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+            InterpolationMode::Linear => D2D1_INTERPOLATION_MODE_LINEAR,
+            InterpolationMode::Cubic => D2D1_INTERPOLATION_MODE_CUBIC,
+            InterpolationMode::HighQualityCubic => D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+        };
     }
 
     fn set_text_alignment(&self, alignment: DWRITE_TEXT_ALIGNMENT) {

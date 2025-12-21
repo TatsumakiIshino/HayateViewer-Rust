@@ -1,7 +1,7 @@
 use image::{DynamicImage, GenericImageView};
 use std::path::Path;
 
-pub use crate::image::cache::DecodedImage;
+pub use crate::image::cache::{DecodedImage, PixelData};
 
 pub fn decode_image<P: AsRef<Path>>(path: P) -> Result<DecodedImage, Box<dyn std::error::Error>> {
     let path_ref = path.as_ref();
@@ -77,7 +77,7 @@ fn decode_jp2(data: &[u8]) -> Result<DecodedImage, Box<dyn std::error::Error>> {
     Ok(DecodedImage {
         width,
         height,
-        data: rgba_data,
+        pixel_data: PixelData::Rgba8(rgba_data),
     })
 }
 
@@ -87,6 +87,6 @@ fn process_dynamic_image(img: DynamicImage) -> DecodedImage {
     DecodedImage {
         width,
         height,
-        data: rgba.into_raw(),
+        pixel_data: PixelData::Rgba8(rgba.into_raw()),
     }
 }
