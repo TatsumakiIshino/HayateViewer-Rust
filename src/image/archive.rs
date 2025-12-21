@@ -7,6 +7,7 @@ pub enum ArchiveInternal {
     Zip(ZipArchive<std::fs::File>),
     SevenZ {
         temp_dir: std::path::PathBuf,
+        #[allow(dead_code)]
         archive_path: std::path::PathBuf,
     },
 }

@@ -24,6 +24,7 @@ pub struct D2DRenderer {
     pub _device: ID2D1Device,
     pub context: ID2D1DeviceContext,
     pub swap_chain: IDXGISwapChain1,
+    #[allow(dead_code)]
     pub dw_factory: IDWriteFactory,
     pub text_format: IDWriteTextFormat,
     pub text_format_large: IDWriteTextFormat,

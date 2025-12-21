@@ -1,11 +1,7 @@
 use image::{DynamicImage, GenericImageView};
 use std::path::Path;
 
-pub struct DecodedImage {
-    pub width: u32,
-    pub height: u32,
-    pub data: Vec<u8>, // RGBA8 形式
-}
+pub use crate::image::cache::DecodedImage;
 
 pub fn decode_image<P: AsRef<Path>>(path: P) -> Result<DecodedImage, Box<dyn std::error::Error>> {
     let path_ref = path.as_ref();

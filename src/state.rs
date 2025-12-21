@@ -104,7 +104,7 @@ impl AppState {
             self.current_page_index.saturating_sub(step)
         };
 
-        self.current_page_index = new_index;
+        self.current_page_index = self.snap_to_spread(new_index);
     }
 
     pub fn snap_to_spread(&self, index: usize) -> usize {

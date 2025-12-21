@@ -7,15 +7,18 @@ pub enum LoaderRequest {
     Load { index: usize, priority: i32 },
     SetSource { source: ImageSource, path_key: String },
     Clear,
+    ClearPrefetch,
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum LoaderResponse {
     Loaded { index: usize },
 }
 
 // winit のカスタムイベント用
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum UserEvent {
     PageLoaded(usize),
 }
@@ -35,58 +38,105 @@ impl AsyncLoader {
             response_rx: Mutex::new(res_rx),
         });
 
-        // バックグラウンドタスクの起動
+        let cache_clone = cache.clone();
+        let event_proxy = proxy.clone();
+
         tokio::spawn(async move {
             let mut current_source: Option<ImageSource> = None;
             let mut current_path_key: String = String::new();
+            let mut queue = std::collections::VecDeque::new();
 
-            while let Some(req) = req_rx.recv().await {
-                match req {
-                    LoaderRequest::SetSource { source, path_key } => {
-                        println!("[Loader] SetSource: path_key={}", path_key);
-                        current_source = Some(source);
-                        current_path_key = path_key;
+            loop {
+                // 1. 新しいリクエストを全てキューに取り込む
+                while let Ok(req) = req_rx.try_recv() {
+                    match req {
+                        LoaderRequest::Clear => {
+                            queue.clear();
+                        }
+                        LoaderRequest::ClearPrefetch => {
+                            queue.retain(|r| matches!(r, LoaderRequest::Load { priority: 0, .. }));
+                        }
+                        LoaderRequest::SetSource { source, path_key } => {
+                            println!("[読み込み] ソースを設定: {}", path_key);
+                            current_source = Some(source);
+                            current_path_key = path_key;
+                            queue.clear();
+                        }
+                        _ => {
+                            queue.push_back(req);
+                        }
                     }
-                    LoaderRequest::Clear => {
-                        println!("[Loader] Clear");
-                        current_source = None;
-                        current_path_key.clear();
-                        let mut c = cache.lock().unwrap();
-                        c.clear();
+                }
+
+                // 2. キューが空なら次のメッセージを待機
+                if queue.is_empty() {
+                    match req_rx.recv().await {
+                        Some(req) => {
+                            match req {
+                                LoaderRequest::Clear => {
+                                    queue.clear();
+                                    continue;
+                                }
+                                LoaderRequest::ClearPrefetch => {
+                                    continue;
+                                }
+                                LoaderRequest::SetSource { source, path_key } => {
+                                    println!("[読み込み] ソースを設定: {}", path_key);
+                                    current_source = Some(source);
+                                    current_path_key = path_key;
+                                    queue.clear();
+                                    continue;
+                                }
+                                _ => queue.push_back(req),
+                            }
+                        }
+                        None => break, // チャンネルクローズ
                     }
+                }
+
+                // 3. 最適なリクエストを選択
+                // Priority 0 (表示要求) を最優先し、その中でも最新のもの (rposition) を選ぶ
+                let next_req_idx = queue.iter().rposition(|r| matches!(r, LoaderRequest::Load { priority: 0, .. }));
+                let next_req = if let Some(pos) = next_req_idx {
+                    queue.remove(pos).unwrap()
+                } else {
+                    queue.pop_front().unwrap()
+                };
+
+                match next_req {
                     LoaderRequest::Load { index, priority } => {
-                        println!("[Loader] Load: index={}, priority={}", index, priority);
                         if let Some(ref mut source) = current_source {
                             let key = format!("{}::{}", current_path_key, index);
                             
-                            // 処理直前にキャッシュを再確認
                             let already_cached = {
-                                let mut c = cache.lock().unwrap();
+                                let mut c = cache_clone.lock().unwrap();
                                 c.get(&key).is_some()
                             };
 
                             if !already_cached {
-                                println!("[Loader] Decoding index {}...", index);
-                                match source.load_image(index) {
+                                println!("[読み込み] デコード中: インデックス {} (優先度 {})...", index, priority);
+                                let res = source.load_image(index).map_err(|e| e.to_string());
+                                match res {
                                     Ok(decoded) => {
-                                        println!("[Loader] Decoded index {} ({}x{})", index, decoded.width, decoded.height);
-                                        let mut c = cache.lock().unwrap();
-                                        c.insert(key.clone(), Arc::new(decoded));
+                                        {
+                                            let mut c = cache_clone.lock().unwrap();
+                                            c.insert(key.clone(), Arc::new(decoded));
+                                        }
+                                        let _ = res_tx.send(LoaderResponse::Loaded { index }).await;
+                                        let _ = event_proxy.send_event(UserEvent::PageLoaded(index));
                                     }
                                     Err(e) => {
-                                        println!("[Loader] FAILED to decode index {}: {}", index, e);
+                                        println!("[読み込み] デコード失敗 インデックス {}: {}", index, e);
                                     }
                                 }
                             } else {
-                                println!("[Loader] Index {} already in cache", index);
+                                // 既にキャッシュにある場合も完了通知は送る
+                                let _ = res_tx.send(LoaderResponse::Loaded { index }).await;
+                                let _ = event_proxy.send_event(UserEvent::PageLoaded(index));
                             }
-                            
-                            let _ = res_tx.send(LoaderResponse::Loaded { index }).await;
-                            let _ = proxy.send_event(UserEvent::PageLoaded(index));
-                        } else {
-                            println!("[Loader] Load failed: source is None");
                         }
                     }
+                    _ => {}
                 }
             }
         });

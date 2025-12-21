@@ -117,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &1i32 as *const _ as _, 4);
     }
 
-    println!("Starting HayateViewer Rust...");
+    println!("HayateViewer Rust を起動中...");
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
@@ -131,8 +131,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app_state.spread_view_first_page_single = settings.spread_view_first_page_single;
 
     // Cache & Loader
-    let cache_capacity = (settings.max_cache_size_mb / 20).max(50) as usize; // 1枚 20MB と仮定して概算、最低50枚
-    let cpu_cache = create_shared_cache(cache_capacity);
+    let max_bytes = (settings.max_cache_size_mb as usize) * 1024 * 1024;
+    let cpu_cache = create_shared_cache(100, max_bytes);
     let loader = AsyncLoader::new(cpu_cache.clone(), proxy);
 
     {
@@ -184,9 +184,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WindowEvent::DroppedFile(path) => {
                     let path_str = path.to_string_lossy().to_string();
-                    println!("Dropped file: {}", path_str);
+                    println!("ファイルをドロップ: {}", path_str);
                     if let Some(new_source) = get_image_source(&path_str) {
-                        println!("Source created: {} files/entries", new_source.len());
+                        println!("ソースを作成: {} 個のファイル/エントリ", new_source.len());
                         if let ImageSource::Files(ref files) = new_source {
                             app_state.image_files = files.clone();
                         } else if let ImageSource::Archive(ref loader) = new_source {
@@ -232,6 +232,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if page_num > 0 && page_num <= app_state.image_files.len() {
                                         app_state.current_page_index = page_num - 1;
                                         view_state.reset();
+                                        let l = loader.clone();
+                                        rt.spawn(async move { let _ = l.send_request(LoaderRequest::ClearPrefetch).await; });
                                         request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                                     }
                                 }
@@ -263,7 +265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) => {
                             if app_state.is_options_open {
-                                let total_options = 7;
+                                let total_options = 8;
                                 if logical_key == Key::Named(NamedKey::ArrowUp) {
                                     app_state.options_selected_index = (app_state.options_selected_index + total_options - 1) % total_options;
                                 } else {
@@ -306,6 +308,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let _ = settings.save("config.json");
                                     }
                                     6 => {
+                                        if direction > 0 { settings.gpu_max_prefetch_pages += 1; }
+                                        else { settings.gpu_max_prefetch_pages = settings.gpu_max_prefetch_pages.saturating_sub(1); }
+                                        let _ = settings.save("config.json");
+                                    }
+                                    7 => {
                                         settings.show_status_bar_info = !settings.show_status_bar_info;
                                         let _ = settings.save("config.json");
                                     }
@@ -323,6 +330,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     app_state.navigate(direction);
                                 }
                                 view_state.reset();
+                                let l = loader.clone();
+                                rt.spawn(async move { let _ = l.send_request(LoaderRequest::ClearPrefetch).await; });
                                 request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                             }
                         }
@@ -348,7 +357,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if !app_state.is_options_open && !app_state.is_jump_open {
                                 let direction = if s == "]" { 1 } else { -1 };
                                 if let Some(new_path) = get_neighboring_source(&current_path_key, direction) {
-                                    println!("Navigating to folder: {}", new_path);
+                                    println!("フォルダ/アーカイブ移動: {}", new_path);
                                     if let Some(new_source) = get_image_source(&new_path) {
                                         if let ImageSource::Files(ref files) = new_source {
                                             app_state.image_files = files.clone();
@@ -356,15 +365,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             app_state.image_files = loader.get_file_names().to_vec();
                                         }
                                         app_state.current_page_index = 0;
-                                        current_bitmaps.clear();
+                                        // フォルダ移動時は一旦クリアしても良いが、
+                                        // シームレスな遷移を重視し ClearPrefetch に留める
+                                        current_bitmaps.clear(); 
                                         current_path_key = new_path.clone();
                                         update_window_title(&window, &current_path_key, &app_state);
                                         
                                         rt.block_on(loader.send_request(LoaderRequest::Clear));
-                                        rt.block_on(loader.send_request(LoaderRequest::SetSource { 
-                                            source: new_source, 
-                                            path_key: new_path 
-                                        }));
+                                        let l = loader.clone();
+                                        rt.spawn(async move { let _ = l.send_request(LoaderRequest::ClearPrefetch).await; });
                                         request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                                     }
                                 }
@@ -408,6 +417,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if new_idx != app_state.current_page_index {
                             app_state.current_page_index = new_idx;
                             view_state.reset();
+                            let l = loader.clone();
+                            rt.spawn(async move { let _ = l.send_request(LoaderRequest::ClearPrefetch).await; });
                             request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                         }
                     }
@@ -446,6 +457,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let idx = (target_progress * (total_pages - 1) as f32).round() as usize;
                                         app_state.current_page_index = app_state.snap_to_spread(idx);
                                         view_state.reset();
+                                        let l = loader.clone();
+                                        rt.spawn(async move { let _ = l.send_request(LoaderRequest::ClearPrefetch).await; });
                                         request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                                     }
                                 } else if view_state.zoom_level > 1.0 {
@@ -486,7 +499,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if scroll.abs() > 0.1 {
                         let direction = if scroll > 0.0 { -1 } else { 1 };
                         app_state.navigate(direction);
-                        current_bitmaps.clear();
+                        let l = loader.clone();
+                        rt.spawn(async move { let _ = l.send_request(LoaderRequest::ClearPrefetch).await; });
                         view_state.reset();
                         request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                         window.request_redraw();
@@ -504,9 +518,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let indices = app_state.get_page_indices_to_display();
                     
-                    // GPU キャッシュの更新
+                    // GPU キャッシュの更新と不要なビットマップの解放
                     {
                         let mut cache = cpu_cache.lock().unwrap();
+                        cache.set_current_context(app_state.current_page_index, indices.clone());
+                        
+                        // 1. 不要なビットマップの解放
+                        let max_gpu_bitmaps = settings.gpu_max_prefetch_pages + indices.len();
+                        let current_idx = app_state.current_page_index as isize;
+                        
+                        // 強制解放距離 (先読み設定の3倍、最低20ページ)
+                        let force_evict_dist = (settings.gpu_max_prefetch_pages * 3).max(20) as isize;
+
+                        if current_bitmaps.len() > max_gpu_bitmaps || current_bitmaps.iter().any(|(idx, _)| (*idx as isize - current_idx).abs() > force_evict_dist) {
+                            // 表示中または距離が近いページを保護し、それ以外を candidates とする
+                            let (mut to_keep, mut candidates): (Vec<_>, Vec<_>) = current_bitmaps.drain(..).partition(|(idx, _)| {
+                                indices.contains(idx) || (*idx as isize - current_idx).abs() <= force_evict_dist
+                            });
+
+                            // 距離が近い順にソート
+                            candidates.sort_by_cached_key(|(idx, _)| (*idx as isize - current_idx).abs());
+                            
+                            // 枚数上限（または距離制限内の全件）になるまで to_keep に戻す
+                            while to_keep.len() < max_gpu_bitmaps && !candidates.is_empty() {
+                                to_keep.push(candidates.remove(0));
+                            }
+
+                            // 残った candidates は解放対象
+                            for (idx, _) in candidates {
+                                println!("[GPUキャッシュ] VRAMを解放しました (距離または枚数超過): ページ {}", idx);
+                            }
+                            current_bitmaps = to_keep;
+                        }
+
+                        // 2. 新しいビットマップの生成
                         for &idx in &indices {
                             if !current_bitmaps.iter().any(|(i, _)| *i == idx) {
                                 let key = format!("{}::{}", current_path_key, idx);
@@ -529,18 +574,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    if !bitmaps_to_draw.is_empty() {
+                    if !indices.is_empty() {
                         unsafe {
+                            // 見開き表示で画像が1枚足りない場合でも、2枚分の枠を確保してレイアウトが崩れないようにする
+                            let mut images_info = Vec::new();
                             let mut total_content_w = 0.0;
                             let mut max_content_h = 0.0;
-                            for bmp in &bitmaps_to_draw {
-                                let size = bmp.GetSize();
-                                total_content_w += size.width;
-                                if size.height > max_content_h { max_content_h = size.height; }
+                            
+                            for &idx in &indices {
+                                if let Some((_, bmp)) = current_bitmaps.iter().find(|(i, _)| *i == idx) {
+                                    let size = bmp.GetSize();
+                                    images_info.push((idx, Some((bmp, size))));
+                                    total_content_w += size.width;
+                                    if size.height > max_content_h { max_content_h = size.height; }
+                                } else {
+                                    // 未ロードのページも枠を確保
+                                    images_info.push((idx, None));
+                                }
                             }
 
-                            if total_content_w > 0.0 && max_content_h > 0.0 {
-                                let scale_fit = (win_w / total_content_w).min(win_h / max_content_h);
+                            // 1枚もロードされていない場合は何もしない
+                            if max_content_h == 0.0 {
+                                // 仮の高さ（ウィンドウサイズなどから推測）
+                                max_content_h = win_h * 0.8;
+                            }
+                            
+                            // 未ロードの画像がある場合、total_content_w を調整
+                            if indices.len() == 2 && images_info.iter().any(|info| info.1.is_none()) {
+                                if let Some((_, Some((_, size)))) = images_info.iter().find(|info| info.1.is_some()) {
+                                    total_content_w = size.width * 2.0;
+                                } else {
+                                    total_content_w = win_w * 0.8;
+                                }
+                            }
+
+                            if total_content_w > 0.0 {
+                                let scale_fit = (win_w / total_content_w).min(win_h / max_content_h).min(1.0);
                                 let total_scale = scale_fit * view_state.zoom_level;
 
                                 let draw_total_w = total_content_w * total_scale;
@@ -552,20 +621,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let base_y = (win_h - draw_max_h) / 2.0 + view_state.pan_offset.1;
 
                                 let mut current_x = base_x;
-                                for bmp in &bitmaps_to_draw {
-                                    let size = bmp.GetSize();
-                                    let w = size.width * total_scale;
-                                    let h = size.height * total_scale;
-                                    let y = base_y + (draw_max_h - h) / 2.0;
-
-                                    let dest_rect = D2D_RECT_F {
-                                        left: current_x,
-                                        top: y,
-                                        right: current_x + w,
-                                        bottom: y + h,
+                                for (idx, info) in images_info {
+                                    // 見開きの場合、個々の画像幅を計算
+                                    let w_step = if indices.len() == 2 {
+                                        total_content_w / 2.0 * total_scale
+                                    } else {
+                                        total_content_w * total_scale
                                     };
-                                    renderer.draw_bitmap(bmp, &dest_rect);
-                                    current_x += w;
+
+                                    let y_center = base_y + draw_max_h / 2.0;
+
+                                    if let Some((bmp, size)) = info {
+                                        let w = size.width * total_scale;
+                                        let h = size.height * total_scale;
+                                        let y = y_center - h / 2.0;
+                                        // 画像を枠内で中央寄せ
+                                        let x = current_x + (w_step - w) / 2.0;
+
+                                        let dest_rect = D2D_RECT_F {
+                                            left: x,
+                                            top: y,
+                                            right: x + w,
+                                            bottom: y + h,
+                                        };
+                                        renderer.draw_bitmap(bmp, &dest_rect);
+                                    } else {
+                                        // ロード中表示
+                                        let text = format!("Loading Page {}...", idx + 1);
+                                        let text_rect = D2D_RECT_F {
+                                            left: current_x,
+                                            top: y_center - 20.0,
+                                            right: current_x + w_step,
+                                            bottom: y_center + 20.0,
+                                        };
+                                        renderer.draw_text(
+                                            &text,
+                                            &text_rect,
+                                            &D2D1_COLOR_F { r: 0.6, g: 0.6, b: 0.6, a: 1.0 }
+                                        );
+                                    }
+                                    current_x += w_step;
                                 }
                             }
                         }
@@ -584,7 +679,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     let total_pages = app_state.image_files.len();
-                    let current_page = app_state.current_page_index + 1;
+                    let display_indices = app_state.get_page_indices_to_display();
+                    let current_page_str = if display_indices.len() > 1 {
+                        let mut sorted_display = display_indices.clone();
+                        sorted_display.sort();
+                        format!("{}-{}", sorted_display[0] + 1, sorted_display.last().unwrap() + 1)
+                    } else {
+                        format!("{}", app_state.current_page_index + 1)
+                    };
                     
                     let cpu_indices: Vec<usize> = {
                         let keys = cpu_cache.lock().unwrap().get_keys();
@@ -595,12 +697,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let path_preview: String = current_path_key.chars().take(20).collect();
                     let status_text = format!(
                         " Page: {} / {} | Backend: Direct2D | CPU: {}p {} | GPU: {}p {} | Key: {}",
-                        current_page,
+                        current_page_str,
                         total_pages,
                         cpu_indices.len(),
-                        format_page_list(&cpu_indices),
+                        format_page_list(&cpu_indices, app_state.current_page_index),
                         gpu_indices.len(),
-                        format_page_list(&gpu_indices),
+                        format_page_list(&gpu_indices, app_state.current_page_index),
                         path_preview
                     );
                     if settings.show_status_bar_info {
@@ -728,6 +830,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ("補間モード (DX)", settings.resampling_mode_dx.as_str()),
                             ("最大キャッシュ容量", &format!("{} MB", settings.max_cache_size_mb)),
                             ("CPU 先読み数", &format!("{} ページ", settings.cpu_max_prefetch_pages)),
+                            ("GPU 先読み数", &format!("{} ページ", settings.gpu_max_prefetch_pages)),
                             ("ステータスバー", if settings.show_status_bar_info { "表示" } else { "非表示" }),
                         ];
 
@@ -771,7 +874,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             Event::UserEvent(user_event) => {
                 match user_event {
-                    UserEvent::PageLoaded(_) => {
+                    UserEvent::PageLoaded(_index) => {
+                        // 読み込み完了したインデックスをログ出力（デバッグ用）
+                        // println!("[イベント] ページ {} のロード完了を受信", _index);
                         window.request_redraw();
                     }
                 }
@@ -824,13 +929,14 @@ fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &
     if max_idx < 0 { return; }
 
     let loader_tx = loader.clone_tx();
+    let _ = loader_tx.try_send(LoaderRequest::Clear); // 過去のリクエストをクリア
 
     // 1. 表示対象の即時リクエスト (Priority 0)
     for &idx in &display_indices {
         let key = format!("{}::{}", path_key, idx);
         let cached = cpu_cache.lock().unwrap().get(&key).is_some();
         if !cached {
-            println!("[Prefetch] Requesting immediate load for index {}", idx);
+            println!("[先読み] インデックス {} の即時読み込みをリクエスト", idx);
             let l = loader_tx.clone();
             rt.spawn(async move {
                 let _ = l.send(LoaderRequest::Load { index: idx, priority: 0 }).await;
@@ -842,6 +948,7 @@ fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &
     let prefetch_dist = settings.cpu_max_prefetch_pages;
     let mut targets = std::collections::HashSet::new();
     
+    // 表示中の全ページについて、その前後 prefetch_dist を先読み対象とする
     for &idx in &display_indices {
         let start = (idx as isize - prefetch_dist as isize).max(0) as usize;
         let end = (idx as isize + prefetch_dist as isize).min(max_idx) as usize;
@@ -858,7 +965,7 @@ fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &
     targets_vec.sort_by_key(|&idx| (idx as isize - current).abs());
     
     if !targets_vec.is_empty() {
-        println!("[Prefetch] Gap filling targets: {:?}", targets_vec);
+        println!("[先読み] 補充対象インデックス: {:?}", targets_vec);
     }
 
     for idx in targets_vec {
@@ -877,15 +984,40 @@ fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &
     }
 }
 
-fn format_page_list(indices: &[usize]) -> String {
+fn format_page_list(indices: &[usize], current: usize) -> String {
     if indices.is_empty() {
         return "[]".to_string();
     }
     let mut sorted = indices.to_vec();
     sorted.sort();
     
-    if sorted.len() > 5 {
-        format!("[{}, {}, {}, ..., {}]", sorted[0] + 1, sorted[1] + 1, sorted[2] + 1, sorted.last().unwrap() + 1)
+    // 現在ページに近いものを優先して表示する
+    if sorted.len() > 8 {
+        let first = sorted[0] + 1;
+        let last = sorted.last().unwrap() + 1;
+        
+        // 現在ページ(current+1)の前後を表示したい
+        let cur = current + 1;
+        let neighbors: Vec<String> = sorted.iter()
+            .map(|&i| i + 1)
+            .filter(|&p| (p as isize - cur as isize).abs() <= 2 || p == first || p == last)
+            .collect::<Vec<_>>()
+            .iter().map(|p| p.to_string()).collect();
+        
+        // 重複を除去して結合
+        let mut result = String::from("[");
+        let mut last_p = 0;
+        for (i, p_str) in neighbors.iter().enumerate() {
+            let p: usize = p_str.parse().unwrap();
+            if i > 0 {
+                if p > last_p + 2 { result.push_str(", [中略] "); }
+                else { result.push_str(", "); }
+            }
+            result.push_str(p_str);
+            last_p = p;
+        }
+        result.push(']');
+        result
     } else {
         format!("{:?}", sorted.iter().map(|i| i + 1).collect::<Vec<_>>())
     }
