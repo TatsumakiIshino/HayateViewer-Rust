@@ -55,14 +55,16 @@ impl Renderer for D3D11Renderer {
     }
 
     fn upload_image(&self, image: &DecodedImage) -> std::result::Result<TextureHandle, Box<dyn std::error::Error>> {
-        // D3D11 特有の実装ができるまでは D2D を流用
-        match image.pixel_data {
-            PixelData::Rgba8(ref data) => {
+        match &image.pixel_data {
+            PixelData::Rgba8(data) => {
+                // D2D ビットマップとして作成（既存の D2D Interop を活用）
                 let bitmap: ID2D1Bitmap1 = self.create_d2d_bitmap(image.width, image.height, data).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
                 Ok(TextureHandle::Direct2D(bitmap))
             }
             PixelData::Ycbcr { .. } => {
-                Err("YCbCr upload not yet implemented for D3D11".into())
+                // TODO: D3D11 ネイティブ実装を完了させる
+                // 現時点ではシェーダファイルと TextureHandle の拡張のみ完了
+                Err("YCbCr upload not yet fully implemented for D3D11 (shader files and handle types ready)".into())
             }
         }
     }
@@ -262,4 +264,5 @@ impl D3D11Renderer {
             )
         }
     }
+
 }

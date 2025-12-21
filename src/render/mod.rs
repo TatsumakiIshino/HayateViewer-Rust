@@ -33,9 +33,18 @@ pub trait Renderer: Send + Sync {
 /// 具体的なオブジェクトはバックエンド側で保持され、IDや列挙型で管理される
 pub enum TextureHandle {
     Direct2D(windows::Win32::Graphics::Direct2D::ID2D1Bitmap1),
-    D3D11(windows::Win32::Graphics::Direct3D11::ID3D11ShaderResourceView),
+    D3D11Rgba(windows::Win32::Graphics::Direct3D11::ID3D11ShaderResourceView),
+    /// YCbCr プレーン（GPU シェーダで RGB に変換）
+    D3D11YCbCr {
+        y: windows::Win32::Graphics::Direct3D11::ID3D11ShaderResourceView,
+        cb: windows::Win32::Graphics::Direct3D11::ID3D11ShaderResourceView,
+        cr: windows::Win32::Graphics::Direct3D11::ID3D11ShaderResourceView,
+        width: u32,
+        height: u32,
+        /// サブサンプリング (dx, dy) - 例: (2, 2) for 4:2:0
+        subsampling: (u8, u8),
+    },
     // 将来的に追加:
-    // YCbCr { y: ..., u: ..., v: ... },
     // OpenGL(u32),
     // Wgpu(wgpu::TextureView),
     // Cpu(Arc<Vec<u8>>),
