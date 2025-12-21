@@ -3,6 +3,7 @@ use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT;
 
 pub mod d2d;
+pub mod d3d11;
 
 /// レンダラーバックエンドが共通で実装すべきトレイト
 pub trait Renderer: Send + Sync {
@@ -32,8 +33,9 @@ pub trait Renderer: Send + Sync {
 /// 具体的なオブジェクトはバックエンド側で保持され、IDや列挙型で管理される
 pub enum TextureHandle {
     Direct2D(windows::Win32::Graphics::Direct2D::ID2D1Bitmap1),
+    D3D11(windows::Win32::Graphics::Direct3D11::ID3D11ShaderResourceView),
     // 将来的に追加:
-    // D3D11(D3D11TextureSet), 
+    // YCbCr { y: ..., u: ..., v: ... },
     // OpenGL(u32),
     // Wgpu(wgpu::TextureView),
     // Cpu(Arc<Vec<u8>>),

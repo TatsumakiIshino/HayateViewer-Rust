@@ -141,7 +141,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
-    let mut renderer = D2DRenderer::new(hwnd)?;
+    let mut renderer: Box<dyn Renderer> = match settings.rendering_backend.as_str() {
+        "direct3d11" => {
+            match crate::render::d3d11::D3D11Renderer::new(hwnd) {
+                Ok(r) => Box::new(r),
+                Err(e) => {
+                    eprintln!("D3D11 レンダラーの初期化に失敗しました。D2D にフォールバックします: {:?}", e);
+                    Box::new(D2DRenderer::new(hwnd)?)
+                }
+            }
+        }
+        _ => Box::new(D2DRenderer::new(hwnd)?),
+    };
     let mut view_state = ViewState::new();
     let mut app_state = AppState::new();
     let mut current_path_key = String::new();
@@ -298,7 +309,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if app_state.is_options_open {
                                 let direction = if logical_key == Key::Named(NamedKey::ArrowRight) { 1 } else { -1 };
                                 match app_state.options_selected_index {
-                                    1 => app_state.is_spread_view = !app_state.is_spread_view,
+                                    0 => {
+                                        let engines = ["direct2d", "direct3d11"];
+                                        let current_idx = engines.iter().position(|&e| e == settings.rendering_backend).unwrap_or(0);
+                                        let new_idx = (current_idx as isize + direction as isize).rem_euclid(engines.len() as isize) as usize;
+                                        settings.rendering_backend = engines[new_idx].to_string();
+                                        let _ = settings.save("config.json");
+                                    }
+                                    1 => {
+                                        app_state.is_spread_view = !app_state.is_spread_view;
+                                        settings.is_spread_view = app_state.is_spread_view;
+                                        let _ = settings.save("config.json");
+                                    },
                                     2 => app_state.binding_direction = if app_state.binding_direction == BindingDirection::Left { BindingDirection::Right } else { BindingDirection::Left },
                                     3 => {
                                         let modes = ["DX_NEAREST", "DX_LINEAR", "DX_CUBIC", "DX_HQC"];
@@ -761,9 +783,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let path_preview: String = current_path_key.chars().take(20).collect();
                     let status_text = format!(
-                        " Page: {} / {} | Backend: Direct2D | CPU: {}p {} | GPU: {}p {} | Key: {}",
+                        " Page: {} / {} | Backend: {} | CPU: {}p {} | GPU: {}p {} | Key: {}",
                         current_page_str,
                         total_pages,
+                        settings.rendering_backend,
                         cpu_indices.len(),
                         format_page_list(&cpu_indices, app_state.current_page_index),
                         gpu_indices.len(),
