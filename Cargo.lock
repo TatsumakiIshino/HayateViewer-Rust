@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "hayate-viewer-rust"
-version = "0.3.0-test"
+version = "0.3.0"
 dependencies = [
  "crc",
  "hayro-jpeg2000",
