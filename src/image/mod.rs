@@ -49,7 +49,7 @@ pub fn get_image_source(path: &str) -> Option<ImageSource> {
         return Some(ImageSource::Files(files));
     } else if let Some(ext) = path_buf.extension().and_then(|s| s.to_str()) {
         let ext_lower = ext.to_lowercase();
-        if ext_lower == "zip" || ext_lower == "7z" || ext_lower == "cbz" {
+        if ext_lower == "zip" || ext_lower == "7z" || ext_lower == "cbz" || ext_lower == "rar" || ext_lower == "cbr" {
             if let Ok(loader) = ArchiveLoader::open(path) {
                 return Some(ImageSource::Archive(loader));
             }
