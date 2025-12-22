@@ -3,6 +3,7 @@ mod config;
 mod render;
 mod image;
 mod state;
+mod ui;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -40,9 +41,9 @@ fn update_window_title(window: &winit::window::Window, _path_key: &str, app_stat
     let spread = if app_state.is_spread_view { " [見開き]" } else { "" };
     
     let title = if total > 0 {
-        format!("HayateViewer - {} / {}{}{}", current + 1, total, binding, spread)
+        format!("HayateViewer v{} - {} / {}{}{}", VERSION, current + 1, total, binding, spread)
     } else {
-        "HayateViewer".to_string()
+        format!("HayateViewer v{}", VERSION)
     };
     window.set_title(&title);
 }
@@ -235,11 +236,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut modifiers = ModifiersState::default();
     
     let mut last_dialog_close = std::time::Instant::now();
+    let mut modern_settings: Option<ui::modern_settings::ModernSettingsWindow> = None;
 
     event_loop.run(move |event: Event<UserEvent>, elwt: &winit::event_loop::EventLoopWindowTarget<UserEvent>| {
         elwt.set_control_flow(ControlFlow::Wait);
         match event {
-            Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
+            Event::WindowEvent { event, window_id } => {
+                // Modern UI ウィンドウのイベント処理
+                if let Some(ref mut ms) = modern_settings {
+                    if ms.window.id() == window_id {
+                        if ms.handle_event(&event) {
+                            modern_settings = None;
+                        } else if matches!(event, WindowEvent::RedrawRequested) {
+                            ms.draw(&settings);
+                        }
+                        return;
+                    }
+                }
+
+                if window_id != window.id() { return; }
+                
+                match event {
                 WindowEvent::CloseRequested => {
                     println!("終了リクエストを受信しました。終了します...");
                     elwt.exit();
@@ -322,10 +339,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if last_dialog_close.elapsed() < std::time::Duration::from_millis(500) {
                                 return;
                             }
-                            // ネイティブダイアログを表示
-                            let proxy_clone = proxy.clone();
-                            show_settings_dialog(hwnd, &mut settings, &app_state, &proxy_clone, &window, &renderer, &rt, &cpu_cache, &current_path_key, elwt);
-                            last_dialog_close = std::time::Instant::now();
+                            
+                            if modifiers.shift_key() {
+                                // ネイティブダイアログを表示
+                                let proxy_clone = proxy.clone();
+                                show_native_settings_dialog(hwnd, &mut settings, &app_state, &proxy_clone, &window, &renderer, &rt, &cpu_cache, &current_path_key, elwt);
+                                last_dialog_close = std::time::Instant::now();
+                            } else {
+                                if modern_settings.is_none() {
+                                    match ui::modern_settings::ModernSettingsWindow::new(elwt, hwnd, &settings) {
+                                        Ok(mw) => {
+                                            modern_settings = Some(mw);
+                                        }
+                                        Err(e) => {
+                                            println!("Failed to open Modern UI: {:?}", e);
+                                            // フォールバック
+                                            let proxy_clone = proxy.clone();
+                                            show_native_settings_dialog(hwnd, &mut settings, &app_state, &proxy_clone, &window, &renderer, &rt, &cpu_cache, &current_path_key, elwt);
+                                        }
+                                    }
+                                }
+                                last_dialog_close = std::time::Instant::now();
+                            }
                         }
                         Key::Character(ref s) if s.to_lowercase() == "s" => {
                             if modifiers.shift_key() {
@@ -857,8 +892,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = renderer.end_draw();
                 }
                 _ => (),
-            },
-            Event::UserEvent(user_event) => {
+            }
+        },
+        Event::UserEvent(user_event) => {
                 match user_event {
                     UserEvent::PageLoaded(_index) => {
                         // 読み込み完了したインデックスをログ出力（デバッグ用）
@@ -872,7 +908,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => (),
         }
-    })?;
+    }).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
     Ok(())
 }
@@ -920,7 +956,7 @@ fn init_opengl(window: &Arc<winit::window::Window>) -> Result<crate::render::ope
     crate::render::opengl::OpenGLRenderer::new(Arc::new(gl), gl_context, gl_surface)
 }
 
-fn show_settings_dialog(
+fn show_native_settings_dialog(
     parent: HWND,
     settings: &mut Settings,
     _app_state: &AppState,
@@ -932,7 +968,7 @@ fn show_settings_dialog(
     _current_path_key: &str,
     elwt: &winit::event_loop::EventLoopWindowTarget<UserEvent>
 ) {
-    println!("DEBUG: show_settings_dialog called");
+    println!("DEBUG: show_native_settings_dialog called");
     let mut temp_settings = settings.clone();
     // ダイアログテンプレートの構築
     let style = 0x0080 | WS_POPUP.0 | WS_CAPTION.0 | WS_SYSMENU.0; // 0x40 (DS_SETFONT) removed to fix crash
