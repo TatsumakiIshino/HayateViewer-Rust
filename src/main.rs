@@ -272,6 +272,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         app_state.current_page_index = 0;
                         current_bitmaps.clear();
+                        
+                        // CPU キャッシュもクリア
+                        if let Ok(mut cache) = cpu_cache.lock() {
+                            cache.clear();
+                        }
+                        
                         current_path_key = path_str.clone();
                         update_window_title(&window, &current_path_key, &app_state);
                         
@@ -401,13 +407,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             app_state.image_files = loader.get_file_names().to_vec();
                                         }
                                         app_state.current_page_index = 0;
-                                        current_bitmaps.clear(); 
+                                        current_bitmaps.clear();
+                                        
+                                        // CPU キャッシュもクリア
+                                        if let Ok(mut cache) = cpu_cache.lock() {
+                                            cache.clear();
+                                        }
+                                        
                                         current_path_key = new_path.clone();
                                         update_window_title(&window, &current_path_key, &app_state);
                                         
+                                        // ローダーをクリアし、新しいソースを設定
                                         rt.block_on(loader.send_request(LoaderRequest::Clear));
                                         let l = loader.clone();
                                         rt.spawn(async move { let _ = l.send_request(LoaderRequest::ClearPrefetch).await; });
+                                        rt.block_on(loader.send_request(LoaderRequest::SetSource { 
+                                            source: new_source, 
+                                            path_key: new_path 
+                                        }));
                                         request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                                     }
                                 }

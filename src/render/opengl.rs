@@ -558,6 +558,11 @@ impl Renderer for OpenGLRenderer {
             self.gl
                 .uniform_4_f32(Some(&self.u_ui_color), color.r, color.g, color.b, color.a);
 
+            // UI 描画時はこれらの uniform は使われないが、初期化しておく
+            self.gl.uniform_1_i32(Some(&self.u_interpolation_mode), 1); // Linear
+            self.gl
+                .uniform_2_f32(Some(&self.u_source_texture_size), 1.0, 1.0); // ゼロ除算防止
+
             let sw = self.surface.width().map(|v| v as f32).unwrap_or(1.0);
             let sh = self.surface.height().map(|v| v as f32).unwrap_or(1.0);
             self.gl.uniform_2_f32(Some(&self.u_window_size), sw, sh);
