@@ -21,6 +21,69 @@ pub struct D3D11Renderer {
     pub text_format: IDWriteTextFormat,
     pub text_format_large: IDWriteTextFormat,
     pub interpolation_mode: D2D1_INTERPOLATION_MODE,
+
+    // D3D11 Resources
+    vertex_shader: ID3D11VertexShader,
+    input_layout: ID3D11InputLayout,
+    pixel_shader_rgba: ID3D11PixelShader,
+    pixel_shader_ycbcr: ID3D11PixelShader,
+    vertex_buffer: ID3D11Buffer,
+    constant_buffer: ID3D11Buffer,
+    sampler_state: ID3D11SamplerState,
+    rasterizer_state: ID3D11RasterizerState,
+}
+
+use windows::Win32::Graphics::Direct3D::Fxc::*;
+
+#[repr(C)]
+struct Vertex {
+    position: [f32; 3],
+    tex_coord: [f32; 2],
+}
+
+#[repr(C)]
+struct YCbCrConstants {
+    color_matrix: [[f32; 4]; 4],
+    offset: [f32; 4],
+    scale: [f32; 4],
+}
+
+fn compile_shader(source: &[u8], entry_point: &str, target: &str) -> Result<ID3DBlob> {
+    unsafe {
+        let mut error_msgs: Option<ID3DBlob> = None;
+        let mut blob: Option<ID3DBlob> = None;
+        
+        let entry_point = std::ffi::CString::new(entry_point).unwrap();
+        let target = std::ffi::CString::new(target).unwrap();
+
+        let res = D3DCompile(
+            source.as_ptr() as _,
+            source.len(),
+            None,
+            None,
+            None,
+            PCSTR(entry_point.as_ptr() as _),
+            PCSTR(target.as_ptr() as _),
+            0,
+            0,
+            &mut blob,
+            Some(&mut error_msgs),
+        );
+
+        if let Err(e) = res {
+            if let Some(errors) = error_msgs {
+                let ptr = errors.GetBufferPointer();
+                let size = errors.GetBufferSize();
+                let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+                let msg = String::from_utf8_lossy(slice);
+                let error_msg = format!("Shader compile error: {}\n{}", e, msg);
+                return Err(Error::new(E_FAIL, &error_msg));
+            }
+            return Err(e.into());
+        }
+        
+        Ok(blob.unwrap())
+    }
 }
 
 impl Renderer for D3D11Renderer {
@@ -61,37 +124,150 @@ impl Renderer for D3D11Renderer {
                 let bitmap: ID2D1Bitmap1 = self.create_d2d_bitmap(image.width, image.height, data).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
                 Ok(TextureHandle::Direct2D(bitmap))
             }
-            PixelData::Ycbcr { .. } => {
-                // TODO: D3D11 ネイティブ実装を完了させる
-                // 現時点ではシェーダファイルと TextureHandle の拡張のみ完了
-                Err("YCbCr upload not yet fully implemented for D3D11 (shader files and handle types ready)".into())
+            PixelData::Ycbcr { planes, subsampling, precision, y_is_signed, c_is_signed } => {
+                if planes.len() != 3 {
+                    return Err("Invalid plane count for YCbCr".into());
+                }
+                
+                let y_srv = self.create_r32_texture(image.width, image.height, &planes[0])?;
+                
+                let (dx, dy) = *subsampling;
+                let c_width = (image.width + dx as u32 - 1) / dx as u32;
+                let c_height = (image.height + dy as u32 - 1) / dy as u32;
+                
+                let cb_srv = self.create_r32_texture(c_width, c_height, &planes[1])?;
+                let cr_srv = self.create_r32_texture(c_width, c_height, &planes[2])?;
+                
+                Ok(TextureHandle::D3D11YCbCr {
+                    y: y_srv,
+                    cb: cb_srv,
+                    cr: cr_srv,
+                    width: image.width,
+                    height: image.height,
+                    subsampling: *subsampling,
+                    precision: *precision,
+                    y_is_signed: *y_is_signed,
+                    c_is_signed: *c_is_signed,
+                })
             }
         }
     }
 
     fn draw_image(&self, texture: &TextureHandle, dest_rect: &D2D_RECT_F) {
-        if let TextureHandle::Direct2D(bitmap) = texture {
-            unsafe {
-                self.d2d_context.DrawBitmap(
-                    bitmap,
-                    Some(dest_rect),
-                    1.0,
-                    self.interpolation_mode,
-                    None,
-                    None,
-                );
+        match texture {
+            TextureHandle::Direct2D(bitmap) => {
+                unsafe {
+                    self.d2d_context.DrawBitmap(
+                        bitmap,
+                        Some(dest_rect),
+                        1.0,
+                        self.interpolation_mode,
+                        None,
+                        None,
+                    );
+                }
+            },
+            TextureHandle::D3D11YCbCr { y, cb, cr, width: _, height: _, subsampling: _, precision, y_is_signed, c_is_signed } => {
+                unsafe {
+                    // D2D の描画コンテキストを一時的に閉じる
+                    self.d2d_context.EndDraw(None, None).unwrap();
+
+                    let viewport = D3D11_VIEWPORT {
+                        TopLeftX: dest_rect.left,
+                        TopLeftY: dest_rect.top,
+                        Width: dest_rect.right - dest_rect.left,
+                        Height: dest_rect.bottom - dest_rect.top,
+                        MinDepth: 0.0,
+                        MaxDepth: 1.0,
+                    };
+                    self.context.RSSetViewports(Some(&[viewport]));
+                    self.context.RSSetState(&self.rasterizer_state);
+
+                    // Create RTV
+                    let back_buffer: ID3D11Texture2D = self.swap_chain.GetBuffer(0).unwrap();
+                    let mut rtv: Option<ID3D11RenderTargetView> = None;
+                    self.device.CreateRenderTargetView(&back_buffer, None, Some(&mut rtv)).unwrap();
+                    
+                    let targets = [rtv];
+                    self.context.OMSetRenderTargets(Some(&targets), None);
+
+                    // Shaders
+                    self.context.VSSetShader(&self.vertex_shader, None);
+                    self.context.PSSetShader(&self.pixel_shader_ycbcr, None);
+                    
+                    // Input Layout
+                    self.context.IASetInputLayout(&self.input_layout);
+                    self.context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+                    
+                    // Resources
+                    let stride = std::mem::size_of::<Vertex>() as u32;
+                    let offset = 0;
+                    let buffers = [Some(self.vertex_buffer.clone())];
+                    self.context.IASetVertexBuffers(0, 1, Some(buffers.as_ptr()), Some(&stride), Some(&offset));
+
+                    // Cb/Cr Swap 解除: 元の順序に戻す
+                    let views = [Some(y.clone()), Some(cb.clone()), Some(cr.clone())];
+                    self.context.PSSetShaderResources(0, Some(&views));
+                    
+                    let samplers = [Some(self.sampler_state.clone())];
+                    self.context.PSSetSamplers(0, Some(&samplers));
+
+                    // Constants Update
+                    // Scale: input(255) -> 1.0 に正規化
+                    let max_val = ((1u32 << precision) - 1) as f32; 
+                    let scale_val = 1.0 / max_val;
+
+                    // OpenJPEG のデータ形式に合わせたオフセット
+                    // Unsigned (0..2^n-1) なら Cb/Cr を -0.5 シフトして 0 中心にする
+                    // Signed なら既に 0 中心なのでオフセット不要
+                    let y_offset = if *y_is_signed { 0.5 } else { 0.0 }; // Y は符号付きなら +0.5 (DC offset)
+                    let c_offset = if *c_is_signed { 0.0 } else { -0.5 };
+ 
+                    let constants = YCbCrConstants {
+                        // D3D11/HLSL のデフォルト（Column-Major）に合わせたパッキング
+                        // mul(v, M) は dot(v, Col_i) を行う。
+                        // Rust 側の各行[0, 1, 2, 3]がそのまま HLSL の Col_i にマッピングされるため、
+                        // 各行に出力チャンネルごとの重みを定義する。
+                        color_matrix: [
+                            [1.0, 1.772,    0.0,      0.0], // Weights for Result.x (Blue)
+                            [1.0, -0.344136, -0.714136, 0.0], // Weights for Result.y (Green)
+                            [1.0, 0.0,      1.402,    0.0], // Weights for Result.z (Red)
+                            [0.0, 0.0,      0.0,      1.0]  // Weights for Result.w (Alpha)
+                        ],
+                        offset: [y_offset, c_offset, c_offset, 0.0],
+                        scale: [scale_val, scale_val, scale_val, 1.0],
+                    };
+                    
+                    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                    self.context.Map(&self.constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped)).unwrap();
+                    std::ptr::copy_nonoverlapping(&constants, mapped.pData as *mut YCbCrConstants, 1);
+                    self.context.Unmap(&self.constant_buffer, 0);
+
+                    let cbufs = [Some(self.constant_buffer.clone())];
+                    self.context.PSSetConstantBuffers(0, Some(&cbufs));
+
+                    self.context.Draw(4, 0);
+                    
+                    // D2D 描画再開
+                    self.d2d_context.BeginDraw();
+                }
             }
+            _ => {}
         }
     }
 
     fn get_texture_size(&self, texture: &TextureHandle) -> (f32, f32) {
-        if let TextureHandle::Direct2D(bitmap) = texture {
-            unsafe {
-                let size = bitmap.GetSize();
-                (size.width, size.height)
+        match texture {
+            TextureHandle::Direct2D(bitmap) => {
+                unsafe {
+                    let size = bitmap.GetSize();
+                    (size.width, size.height)
+                }
+            },
+            TextureHandle::D3D11YCbCr { width, height, .. } => {
+                (*width as f32, *height as f32)
             }
-        } else {
-            (0.0, 0.0)
+            _ => (0.0, 0.0),
         }
     }
 
@@ -229,6 +405,143 @@ impl D3D11Renderer {
 
             let brush = d2d_context.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?;
 
+            // --- Shader Compilation & Resource Creation ---
+
+            let quad_src = include_bytes!("shaders/texture_quad.hlsl");
+            let ycbcr_src = include_bytes!("shaders/ycbcr_to_rgb.hlsl");
+
+            let vs_blob = compile_shader(ycbcr_src, "VSMain", "vs_5_0")?;
+            let mut vertex_shader: Option<ID3D11VertexShader> = None;
+            device.CreateVertexShader(
+                std::slice::from_raw_parts(vs_blob.GetBufferPointer() as *const u8, vs_blob.GetBufferSize()),
+                None,
+                Some(&mut vertex_shader)
+            )?;
+            let vertex_shader = vertex_shader.unwrap();
+
+            let ps_rgba_blob = compile_shader(quad_src, "PSMain", "ps_5_0")?;
+            let mut pixel_shader_rgba: Option<ID3D11PixelShader> = None;
+            device.CreatePixelShader(
+                std::slice::from_raw_parts(ps_rgba_blob.GetBufferPointer() as *const u8, ps_rgba_blob.GetBufferSize()),
+                None,
+                Some(&mut pixel_shader_rgba)
+            )?;
+            let pixel_shader_rgba = pixel_shader_rgba.unwrap();
+
+            let ps_ycbcr_blob = compile_shader(ycbcr_src, "PSMain_Generic", "ps_5_0")?;
+            let mut pixel_shader_ycbcr: Option<ID3D11PixelShader> = None;
+            device.CreatePixelShader(
+                std::slice::from_raw_parts(ps_ycbcr_blob.GetBufferPointer() as *const u8, ps_ycbcr_blob.GetBufferSize()),
+                None,
+                Some(&mut pixel_shader_ycbcr)
+            )?;
+            let pixel_shader_ycbcr = pixel_shader_ycbcr.unwrap();
+
+            // Input Layout
+            let input_element_descs = [
+                D3D11_INPUT_ELEMENT_DESC {
+                    SemanticName: PCSTR(b"POSITION\0".as_ptr()),
+                    SemanticIndex: 0,
+                    Format: DXGI_FORMAT_R32G32B32_FLOAT,
+                    InputSlot: 0,
+                    AlignedByteOffset: 0,
+                    InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                    InstanceDataStepRate: 0,
+                },
+                D3D11_INPUT_ELEMENT_DESC {
+                    SemanticName: PCSTR(b"TEXCOORD\0".as_ptr()),
+                    SemanticIndex: 0,
+                    Format: DXGI_FORMAT_R32G32_FLOAT,
+                    InputSlot: 0,
+                    AlignedByteOffset: 12, // 3 * 4 bytes
+                    InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                    InstanceDataStepRate: 0,
+                },
+            ];
+
+            let mut input_layout: Option<ID3D11InputLayout> = None;
+            device.CreateInputLayout(
+                &input_element_descs,
+                std::slice::from_raw_parts(vs_blob.GetBufferPointer() as *const u8, vs_blob.GetBufferSize()),
+                Some(&mut input_layout)
+            )?;
+            let input_layout = input_layout.unwrap();
+
+            // Vertex Buffer (Full screen quad, Triangle Strip)
+            let vertices = [
+                Vertex { position: [-1.0,  1.0, 0.0], tex_coord: [0.0, 0.0] }, // Top-Left
+                Vertex { position: [ 1.0,  1.0, 0.0], tex_coord: [1.0, 0.0] }, // Top-Right
+                Vertex { position: [-1.0, -1.0, 0.0], tex_coord: [0.0, 1.0] }, // Bottom-Left
+                Vertex { position: [ 1.0, -1.0, 0.0], tex_coord: [1.0, 1.0] }, // Bottom-Right
+            ];
+
+            let vb_desc = D3D11_BUFFER_DESC {
+                ByteWidth: (std::mem::size_of::<Vertex>() * vertices.len()) as u32,
+                Usage: D3D11_USAGE_IMMUTABLE,
+                BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32, // ここも cast
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+                StructureByteStride: 0,
+            };
+
+            let vb_data = D3D11_SUBRESOURCE_DATA {
+                pSysMem: vertices.as_ptr() as _,
+                SysMemPitch: 0,
+                SysMemSlicePitch: 0,
+            };
+
+            let mut vertex_buffer: Option<ID3D11Buffer> = None;
+            device.CreateBuffer(&vb_desc, Some(&vb_data), Some(&mut vertex_buffer))?;
+            let vertex_buffer = vertex_buffer.unwrap();
+
+            // Constant Buffer
+            let cb_desc = D3D11_BUFFER_DESC {
+                ByteWidth: std::mem::size_of::<YCbCrConstants>() as u32, // 16byte alignment check? -> assume it fits 16 bytes multiple
+                Usage: D3D11_USAGE_DYNAMIC,
+                BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+                CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+                MiscFlags: 0,
+                StructureByteStride: 0,
+            };
+
+            let mut constant_buffer: Option<ID3D11Buffer> = None;
+            device.CreateBuffer(&cb_desc, None, Some(&mut constant_buffer))?; // created empty
+            let constant_buffer = constant_buffer.unwrap();
+
+            // Sampler State
+            let sampler_desc = D3D11_SAMPLER_DESC {
+                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                MaxAnisotropy: 1,
+                ComparisonFunc: D3D11_COMPARISON_ALWAYS,
+                MinLOD: 0.0,
+                MaxLOD: D3D11_FLOAT32_MAX,
+                ..Default::default()
+            };
+
+            let mut sampler_state: Option<ID3D11SamplerState> = None;
+            device.CreateSamplerState(&sampler_desc, Some(&mut sampler_state))?;
+            let sampler_state = sampler_state.unwrap();
+
+            // Rasterizer State (Cull None)
+            let rs_desc = D3D11_RASTERIZER_DESC {
+                FillMode: D3D11_FILL_SOLID,
+                CullMode: D3D11_CULL_NONE,
+                FrontCounterClockwise: false.into(),
+                DepthBias: 0,
+                DepthBiasClamp: 0.0,
+                SlopeScaledDepthBias: 0.0,
+                DepthClipEnable: true.into(),
+                ScissorEnable: false.into(),
+                MultisampleEnable: false.into(),
+                AntialiasedLineEnable: false.into(),
+            };
+            let mut rasterizer_state: Option<ID3D11RasterizerState> = None;
+            device.CreateRasterizerState(&rs_desc, Some(&mut rasterizer_state))?;
+            let rasterizer_state = rasterizer_state.unwrap();
+
             Ok(Self {
                 device,
                 context,
@@ -239,6 +552,15 @@ impl D3D11Renderer {
                 text_format,
                 text_format_large,
                 interpolation_mode: D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                
+                vertex_shader,
+                input_layout,
+                pixel_shader_rgba,
+                pixel_shader_ycbcr,
+                vertex_buffer,
+                constant_buffer,
+                sampler_state,
+                rasterizer_state,
             })
         }
     }
@@ -262,6 +584,49 @@ impl D3D11Renderer {
                 width * 4,
                 &props,
             )
+        }
+    }
+
+    pub fn create_r32_texture(&self, width: u32, height: u32, data: &[i32]) -> Result<ID3D11ShaderResourceView> {
+        unsafe {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_R32_SINT,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+
+            let init_data = D3D11_SUBRESOURCE_DATA {
+                pSysMem: data.as_ptr() as _,
+                SysMemPitch: width * 4, // 4 bytes per i32
+                SysMemSlicePitch: 0,
+            };
+
+            let mut texture: Option<ID3D11Texture2D> = None;
+            self.device.CreateTexture2D(&desc, Some(&init_data), Some(&mut texture))?;
+            let texture = texture.unwrap();
+
+            let srv_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+                Format: desc.Format,
+                ViewDimension: D3D11_SRV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Texture2D: D3D11_TEX2D_SRV {
+                        MostDetailedMip: 0,
+                        MipLevels: 1,
+                    },
+                },
+            };
+            
+            let resource: ID3D11Resource = texture.cast()?;
+            let mut srv: Option<ID3D11ShaderResourceView> = None;
+            self.device.CreateShaderResourceView(&resource, Some(&srv_desc), Some(&mut srv))?;
+            Ok(srv.unwrap())
         }
     }
 

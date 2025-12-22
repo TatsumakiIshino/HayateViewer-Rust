@@ -25,7 +25,7 @@ use winit::{
     window::WindowBuilder,
     keyboard::{PhysicalKey, KeyCode, ModifiersState, Key, NamedKey},
 };
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 use winit::platform::windows::WindowBuilderExtWindows;
 use tokio::runtime::Runtime;
 
@@ -126,8 +126,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_drag_and_drop(true)
         .build(&event_loop)?);
 
-    let hwnd = match window.window_handle()?.as_raw() {
-        RawWindowHandle::Win32(handle) => HWND(handle.hwnd.get() as _),
+    let hwnd = match window.raw_window_handle() {
+        RawWindowHandle::Win32(handle) => HWND(handle.hwnd as _),
         _ => return Err("Unsupported window handle".into()),
     };
 
@@ -148,6 +148,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => {
                     eprintln!("D3D11 レンダラーの初期化に失敗しました。D2D にフォールバックします: {:?}", e);
                     Box::new(D2DRenderer::new(hwnd)?)
+                }
+            }
+        }
+        "opengl" => {
+            match init_opengl(&window) {
+                Ok(r) => Box::new(r),
+                Err(e) => {
+                    eprintln!("OpenGL レンダラーの初期化に失敗しました。D3D11 にフォールバックします: {:?}", e);
+                    match crate::render::d3d11::D3D11Renderer::new(hwnd) {
+                        Ok(r) => Box::new(r),
+                        Err(_) => Box::new(D2DRenderer::new(hwnd)?),
+                    }
                 }
             }
         }
@@ -297,7 +309,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) => {
                             if app_state.is_options_open {
-                                let total_options = 9;
+                                let total_options = 10;
                                 if logical_key == Key::Named(NamedKey::ArrowUp) {
                                     app_state.options_selected_index = (app_state.options_selected_index + total_options - 1) % total_options;
                                 } else {
@@ -310,10 +322,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let direction = if logical_key == Key::Named(NamedKey::ArrowRight) { 1 } else { -1 };
                                 match app_state.options_selected_index {
                                     0 => {
-                                        let engines = ["direct2d", "direct3d11"];
+                                        let engines = ["direct2d", "direct3d11", "opengl"];
                                         let current_idx = engines.iter().position(|&e| e == settings.rendering_backend).unwrap_or(0);
                                         let new_idx = (current_idx as isize + direction as isize).rem_euclid(engines.len() as isize) as usize;
                                         settings.rendering_backend = engines[new_idx].to_string();
+                                        println!("[設定] レンダリングエンジンを {} に変更しました (再起動後に反映)", settings.rendering_backend);
                                         let _ = settings.save("config.json");
                                     }
                                     1 => {
@@ -363,6 +376,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if direction > 0 { settings.parallel_decoding_workers += 1; }
                                         else { settings.parallel_decoding_workers = settings.parallel_decoding_workers.saturating_sub(1); }
                                         let _ = settings.save("config.json");
+                                    }
+                                    9 => {
+                                        settings.use_cpu_color_conversion = !settings.use_cpu_color_conversion;
+                                        let _ = settings.save("config.json");
+                                        // 設定変更時はキャッシュをクリアして再読込
+                                        cpu_cache.lock().unwrap().clear();
+                                        current_bitmaps.clear();
+                                        request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                                     }
                                     _ => (),
                                 }
@@ -921,6 +942,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ("GPU 先読み数", &format!("{} ページ", settings.gpu_max_prefetch_pages)),
                             ("ステータスバー", if settings.show_status_bar_info { "表示" } else { "非表示" }),
                             ("デコードスレッド数", &format!("{} (要再起動)", settings.parallel_decoding_workers)),
+                            ("CPU 色空間変換", if settings.use_cpu_color_conversion { "オン" } else { "オフ" }),
                         ];
 
                         for (i, (label, value)) in options.iter().enumerate() {
@@ -980,6 +1002,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn init_opengl(window: &Arc<winit::window::Window>) -> Result<crate::render::opengl::OpenGLRenderer, Box<dyn std::error::Error>> {
+    use glutin::prelude::*;
+    use glutin::config::ConfigTemplateBuilder;
+    use glutin::context::{ContextAttributesBuilder, ContextApi};
+    use glutin::surface::{SurfaceAttributesBuilder, WindowSurface};
+    use glutin_winit::GlWindow;
+    use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
+
+    let raw_display_handle = window.raw_display_handle();
+    let display = unsafe { glutin::display::Display::new(raw_display_handle, glutin::display::DisplayApiPreference::Wgl(None))? };
+
+    let template = ConfigTemplateBuilder::new()
+        .with_alpha_size(8)
+        .with_transparency(true);
+    let config = unsafe { display.find_configs(template.build())?.next().ok_or("No GL config found")? };
+
+    let raw_window_handle = window.raw_window_handle();
+    let context_attributes = ContextAttributesBuilder::new()
+        .with_context_api(ContextApi::OpenGl(Some(glutin::context::Version::new(3, 3))))
+        .build(Some(raw_window_handle));
+
+    let fallback_context_attributes = ContextAttributesBuilder::new()
+        .with_context_api(ContextApi::OpenGl(Some(glutin::context::Version::new(3, 3))))
+        .build(None);
+
+    let mut not_current_gl_context = Some(unsafe {
+        display.create_context(&config, &context_attributes)
+            .or_else(|_| display.create_context(&config, &fallback_context_attributes))?
+    });
+
+    let attrs = window.build_surface_attributes(SurfaceAttributesBuilder::<WindowSurface>::new());
+    let gl_surface = unsafe { display.create_window_surface(&config, &attrs)? };
+
+    let gl_context = not_current_gl_context.take().unwrap().make_current(&gl_surface)?;
+    
+    let gl = unsafe { glow::Context::from_loader_function(|s| {
+        let name = std::ffi::CString::new(s).unwrap();
+        display.get_proc_address(&name) as *const _
+    }) };
+
+    crate::render::opengl::OpenGLRenderer::new(Arc::new(gl), gl_context, gl_surface)
+}
+
 fn update_window_title(window: &winit::window::Window, path_key: &str, app_state: &AppState) {
     if path_key.is_empty() {
         window.set_title(&format!("HayateViewer Rust v{}", VERSION));
@@ -1027,8 +1092,9 @@ fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &
         if !cached {
             println!("[先読み] インデックス {} の即時読み込みをリクエスト", idx);
             let l = loader_tx.clone();
+            let cpu_conv = settings.use_cpu_color_conversion;
             rt.spawn(async move {
-                let _ = l.send(LoaderRequest::Load { index: idx, priority: 0 }).await;
+                let _ = l.send(LoaderRequest::Load { index: idx, priority: 0, use_cpu_color_conversion: cpu_conv }).await;
             });
         }
     }
@@ -1066,8 +1132,9 @@ fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &
         
         if !cached {
             let l = loader_tx.clone();
+            let cpu_conv = settings.use_cpu_color_conversion;
             rt.spawn(async move {
-                let _ = l.send(LoaderRequest::Load { index: idx, priority: 1 }).await;
+                let _ = l.send(LoaderRequest::Load { index: idx, priority: 1, use_cpu_color_conversion: cpu_conv }).await;
             });
         }
     }

@@ -20,6 +20,7 @@ pub struct Settings {
     pub cpu_max_prefetch_pages: usize,
     pub gpu_max_prefetch_pages: usize,
     pub show_status_bar_info: bool,
+    pub use_cpu_color_conversion: bool,
 }
 
 impl Default for Settings {
@@ -41,6 +42,7 @@ impl Default for Settings {
             cpu_max_prefetch_pages: 10,
             gpu_max_prefetch_pages: 9,
             show_status_bar_info: true,
+            use_cpu_color_conversion: false,
         }
     }
 }

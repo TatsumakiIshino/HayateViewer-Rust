@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 pub enum LoaderRequest {
-    Load { index: usize, priority: i32 },
+    Load { index: usize, priority: i32, use_cpu_color_conversion: bool },
     SetSource { source: ImageSource, path_key: String },
     Clear,
     ClearPrefetch,
@@ -104,7 +104,7 @@ impl AsyncLoader {
                 };
 
                 match next_req {
-                    LoaderRequest::Load { index, priority } => {
+                    LoaderRequest::Load { index, priority, use_cpu_color_conversion } => {
                         if let Some(ref mut _source) = current_source {
                             let key = format!("{}::{}", current_path_key, index);
                             
@@ -112,13 +112,13 @@ impl AsyncLoader {
                                 let mut c = cache_clone.lock().unwrap();
                                 c.get(&key).is_some()
                             };
-
+ 
                             if !already_cached {
                                 println!("[読み込み] デコード中: インデックス {} (優先度 {})...", index, priority);
                                 // 重い処理（特に7z一括展開）をスレッドプールに逃がす
                                 let mut source_for_task = current_source.take().unwrap();
                                 let (res, returned_source) = tokio::task::spawn_blocking(move || {
-                                    let r = source_for_task.load_image(index).map_err(|e| e.to_string());
+                                    let r = source_for_task.load_image(index, use_cpu_color_conversion).map_err(|e| e.to_string());
                                     (r, source_for_task)
                                 }).await.unwrap();
                                 

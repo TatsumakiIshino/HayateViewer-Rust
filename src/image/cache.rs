@@ -12,7 +12,8 @@ pub enum PixelData {
         planes: Vec<Vec<i32>>, // Y, Cb, Cr
         subsampling: (u8, u8), // (dx, dy)
         precision: u8,         // bit深度
-        is_signed: bool,       // 符号付きか (hayro は signed)
+        y_is_signed: bool,     // Y が符号付きか
+        c_is_signed: bool,     // Cb/Cr が符号付きか
     },
 }
 

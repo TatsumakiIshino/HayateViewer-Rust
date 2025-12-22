@@ -20,14 +20,14 @@ impl ImageSource {
         }
     }
 
-    pub fn load_image(&mut self, index: usize) -> Result<DecodedImage, Box<dyn std::error::Error>> {
+    pub fn load_image(&mut self, index: usize, use_cpu_color_conversion: bool) -> Result<DecodedImage, Box<dyn std::error::Error>> {
         match self {
             Self::Files(f) => {
-                let decoded = decoder::decode_image(&f[index])?;
+                let decoded = decoder::decode_image(&f[index], use_cpu_color_conversion)?;
                 Ok(decoded)
             }
             Self::Archive(a) => {
-                a.load_image(index)
+                a.load_image(index, use_cpu_color_conversion)
             }
         }
     }

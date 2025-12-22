@@ -4,6 +4,7 @@ use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT;
 
 pub mod d2d;
 pub mod d3d11;
+pub mod opengl;
 
 /// レンダラーバックエンドが共通で実装すべきトレイト
 pub trait Renderer: Send + Sync {
@@ -41,11 +42,24 @@ pub enum TextureHandle {
         cr: windows::Win32::Graphics::Direct3D11::ID3D11ShaderResourceView,
         width: u32,
         height: u32,
-        /// サブサンプリング (dx, dy) - 例: (2, 2) for 4:2:0
         subsampling: (u8, u8),
+        precision: u8,
+        y_is_signed: bool,
+        c_is_signed: bool,
+    },
+    OpenGL(u32),
+    OpenGLYCbCr {
+        y: u32,
+        cb: u32,
+        cr: u32,
+        width: u32,
+        height: u32,
+        subsampling: (u8, u8),
+        precision: u8,
+        y_is_signed: bool,
+        c_is_signed: bool,
     },
     // 将来的に追加:
-    // OpenGL(u32),
     // Wgpu(wgpu::TextureView),
     // Cpu(Arc<Vec<u8>>),
 }

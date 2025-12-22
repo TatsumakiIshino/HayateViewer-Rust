@@ -108,7 +108,7 @@ impl ArchiveLoader {
         &self.file_names
     }
 
-    pub fn load_image(&mut self, index: usize) -> Result<DecodedImage, Box<dyn std::error::Error>> {
+    pub fn load_image(&mut self, index: usize, use_cpu_color_conversion: bool) -> Result<DecodedImage, Box<dyn std::error::Error>> {
         let name = &self.file_names[index];
         
         // 1. キャッシュチェック
@@ -117,7 +117,7 @@ impl ArchiveLoader {
             if let Some(ref map) = *cache {
                 if let Some(data) = map.get(name) {
                     println!("[Archive] Cache hit: {}", name);
-                    return _decode_image_from_memory(data).map_err(|e| e.into());
+                    return _decode_image_from_memory(data, use_cpu_color_conversion).map_err(|e| e.into());
                 }
             }
         }
@@ -169,7 +169,7 @@ impl ArchiveLoader {
         }
 
         println!("[Archive] Slurping complete. Memory items: {}", self.cache.lock().unwrap().as_ref().unwrap().len());
-        let decoded = _decode_image_from_memory(&data)?;
+        let decoded = _decode_image_from_memory(&data, use_cpu_color_conversion)?;
         Ok(decoded)
     }
 }
