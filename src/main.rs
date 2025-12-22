@@ -632,14 +632,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // 1. 不要なビットマップの解放
                         let max_gpu_bitmaps = settings.gpu_max_prefetch_pages + indices.len();
                         let current_idx = app_state.current_page_index as isize;
+                        let max_idx = app_state.image_files.len() as isize - 1;
+
+                        // GPU キャッシュ保持対象範囲の計算 (前後 settings.gpu_max_prefetch_pages)
+                        let mut gpu_targets = indices.clone();
+                        let prefetch_dist = settings.gpu_max_prefetch_pages as isize;
+                        for i in 1..=prefetch_dist {
+                            if current_idx - i >= 0 { gpu_targets.push((current_idx - i) as usize); }
+                            if current_idx + i <= max_idx { gpu_targets.push((current_idx + i) as usize); }
+                        }
+                        gpu_targets.sort();
+                        gpu_targets.dedup();
                         
-                        // 強制解放距離 (先読み設定の3倍、最低20ページ)
-                        let force_evict_dist = (settings.gpu_max_prefetch_pages * 3).max(20) as isize;
+                        // 強制解放距離 (先読み設定の2倍強、最低20ページ)
+                        let force_evict_dist = (settings.gpu_max_prefetch_pages * 2 + 2).max(20) as isize;
 
                         if current_bitmaps.len() > max_gpu_bitmaps || current_bitmaps.iter().any(|(idx, _)| (*idx as isize - current_idx).abs() > force_evict_dist) {
-                            // 表示中または距離が近いページを保護し、それ以外を candidates とする
+                            // 保持対象（先読み範囲内）または距離が近いページを保護し、それ以外を candidates とする
                             let (mut to_keep, mut candidates): (Vec<_>, Vec<_>) = current_bitmaps.drain(..).partition(|(idx, _)| {
-                                indices.contains(idx) || (*idx as isize - current_idx).abs() <= force_evict_dist
+                                gpu_targets.contains(idx) || (*idx as isize - current_idx).abs() <= force_evict_dist
                             });
 
                             // 距離が近い順にソート
@@ -657,13 +668,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             current_bitmaps = to_keep;
                         }
 
-                        // 2. 新しいビットマップの生成
-                        for &idx in &indices {
+                        // 2. 新しいビットマップの生成 (表示中 + 先読み範囲)
+                        // 表示中のページを最優先し、次に近い順にアップロードする
+                        let mut upload_candidates = gpu_targets.clone();
+                        upload_candidates.sort_by_key(|&idx| (idx as isize - current_idx).abs());
+
+                        for &idx in &upload_candidates {
                             if !current_bitmaps.iter().any(|(i, _)| *i == idx) {
                                 let key = format!("{}::{}", current_path_key, idx);
                                 if let Some(decoded) = cache.get(&key) {
                                     if let Ok(texture) = renderer.upload_image(&decoded) {
                                         current_bitmaps.push((idx, texture));
+                                        // 1ループでのアップロード枚数を制限してカクつきを抑えることも可能だが、
+                                        // 現状は cache.get できたものはすべてアップロードする
                                     }
                                 }
                             }
