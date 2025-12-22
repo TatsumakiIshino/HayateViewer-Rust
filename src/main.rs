@@ -8,7 +8,7 @@ mod ui;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use crate::config::Settings;
-use crate::render::{Renderer, InterpolationMode};
+use crate::render::Renderer;
 use crate::render::d2d::D2DRenderer;
 use crate::image::{get_image_source, ImageSource};
 use crate::image::cache::{create_shared_cache, SharedImageCache};
@@ -199,18 +199,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cpu_cache = create_shared_cache(100, max_bytes);
     let loader = AsyncLoader::new(cpu_cache.clone(), proxy.clone());
 
-    {
-
-        let mode = match settings.resampling_mode_dx.as_str() {
-            "DX_NEAREST" => InterpolationMode::NearestNeighbor,
-            "DX_LINEAR" => InterpolationMode::Linear,
-            "DX_CUBIC" => InterpolationMode::Cubic,
-            "DX_HQC" => InterpolationMode::HighQualityCubic,
-            "DX_LANCZOS" => InterpolationMode::Lanczos,
-            _ => InterpolationMode::HighQualityCubic,
-        };
-        renderer.set_interpolation_mode(mode);
-    }
+    let gpu_mode = match settings.resampling_mode_gpu.as_str() {
+        "Nearest" => crate::render::InterpolationMode::NearestNeighbor,
+        "Linear" => crate::render::InterpolationMode::Linear,
+        "Cubic" => crate::render::InterpolationMode::Cubic,
+        "Lanczos" => crate::render::InterpolationMode::Lanczos,
+        _ => crate::render::InterpolationMode::Linear,
+    };
+    renderer.set_interpolation_mode(gpu_mode);
 
     // 初期パスの読み込み
     let args: Vec<String> = std::env::args().collect();
@@ -946,20 +942,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
                 }
                 UserEvent::RotateResamplingGpu => {
-                    let modes = ["GL_LANCZOS3", "GL_LINEAR", "DX_LANCZOS", "DX_LINEAR"];
-                    let current = settings.resampling_mode_gl.as_str(); // GL/DX 共用で簡易的に
+                    let modes = ["Nearest", "Linear", "Cubic", "Lanczos"];
+                    let current = settings.resampling_mode_gpu.as_str();
                     let idx = modes.iter().position(|&m| m == current).unwrap_or(0);
                     let new_mode = modes[(idx + 1) % modes.len()];
-                    settings.resampling_mode_gl = new_mode.to_string();
-                    settings.resampling_mode_dx = new_mode.to_string();
+                    settings.resampling_mode_gpu = new_mode.to_string();
+                    
+                    // レンダラーに即時反映
+                    let mode_enum = match new_mode {
+                        "Nearest" => crate::render::InterpolationMode::NearestNeighbor,
+                        "Linear" => crate::render::InterpolationMode::Linear,
+                        "Cubic" => crate::render::InterpolationMode::Cubic,
+                        "Lanczos" => crate::render::InterpolationMode::Lanczos,
+                        _ => crate::render::InterpolationMode::Linear,
+                    };
+                    renderer.set_interpolation_mode(mode_enum);
+
                     let _ = settings.save("config.json");
                     view_state.reset();
                     window.request_redraw();
-                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                    if let Some(ref mut ms) = modern_settings {
+                        ms.window.request_redraw();
+                    }
                 }
                 UserEvent::ToggleStatusBar => {
                     settings.show_status_bar_info = !settings.show_status_bar_info;
                     let _ = settings.save("config.json");
+                    window.request_redraw();
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                }
+                UserEvent::RotateRenderingBackend => {
+                    let backends = ["direct2d", "direct3d11", "opengl"];
+                    let current = settings.rendering_backend.as_str();
+                    let idx = backends.iter().position(|&b| b == current).unwrap_or(0);
+                    settings.rendering_backend = backends[(idx + 1) % backends.len()].to_string();
+                    let _ = settings.save("config.json");
+                    println!("[設定] レンダリングバックエンドを {} に変更しました。反映には再起動が必要です。", settings.rendering_backend);
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                }
+                UserEvent::RotateDisplayMode => {
+                    // 順序: 単一(false, any) -> 左(true, "left") -> 右(true, "right")
+                    if !settings.is_spread_view {
+                        settings.is_spread_view = true;
+                        settings.binding_direction = "left".to_string();
+                    } else if settings.binding_direction == "left" {
+                        settings.binding_direction = "right".to_string();
+                    } else {
+                        settings.is_spread_view = false;
+                    }
+                    app_state.is_spread_view = settings.is_spread_view;
+                    app_state.binding_direction = if settings.binding_direction == "right" { BindingDirection::Right } else { BindingDirection::Left };
+                    let _ = settings.save("config.json");
+                    view_state.reset();
+                    request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                     window.request_redraw();
                     if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
                 }
@@ -1123,7 +1158,7 @@ fn show_native_settings_dialog(
                     }
                 }
 
-                unsafe { CheckDlgButton(hwnd, 102, if settings.is_spread_view { BST_CHECKED } else { BST_UNCHECKED }); }
+                unsafe { let _ = CheckDlgButton(hwnd, 102, if settings.is_spread_view { BST_CHECKED } else { BST_UNCHECKED }); }
                 
                 let cb_binding = unsafe { GetDlgItem(Some(hwnd), 103).ok().unwrap_or(HWND::default()) };
                 for (i, name) in ["左綴じ / 左開き", "右綴じ / 右開き"].iter().enumerate() {
@@ -1135,12 +1170,12 @@ fn show_native_settings_dialog(
                 }
 
                 let cb_res = unsafe { GetDlgItem(Some(hwnd), 104).ok().unwrap_or(HWND::default()) };
-                let modes = ["DX_NEAREST", "DX_LINEAR", "DX_CUBIC", "DX_HQC", "DX_LANCZOS"];
-                let mode_names = ["ニアレストネイバー", "バイリニア", "バイキュービック", "高品質バイキュービック", "Lanczos"];
+                let modes = ["Nearest", "Linear", "Cubic", "Lanczos"];
+                let mode_names = ["Nearest Neighbor (最近傍補間)", "Bilinear (双線形補間)", "Bicubic (双三次補間)", "Lanczos3 (ランツォシュ)"];
                 for (i, name) in mode_names.iter().enumerate() {
                     let wide_name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
                     unsafe { let _ = SendMessageW(cb_res, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide_name.as_ptr() as _))); }
-                    if modes[i] == settings.resampling_mode_dx {
+                    if modes[i] == settings.resampling_mode_gpu {
                         unsafe { let _ = SendMessageW(cb_res, CB_SETCURSEL, Some(WPARAM(i)), Some(LPARAM(0))); }
                     }
                 }
@@ -1149,9 +1184,9 @@ fn show_native_settings_dialog(
                     let _ = SetDlgItemInt(hwnd, 105, settings.max_cache_size_mb as u32, false);
                     let _ = SetDlgItemInt(hwnd, 106, settings.cpu_max_prefetch_pages as u32, false);
                     let _ = SetDlgItemInt(hwnd, 107, settings.gpu_max_prefetch_pages as u32, false);
-                    CheckDlgButton(hwnd, 108, if settings.show_status_bar_info { BST_CHECKED } else { BST_UNCHECKED });
+                    let _ = CheckDlgButton(hwnd, 108, if settings.show_status_bar_info { BST_CHECKED } else { BST_UNCHECKED });
                     let _ = SetDlgItemInt(hwnd, 109, settings.parallel_decoding_workers as u32, false);
-                    CheckDlgButton(hwnd, 110, if settings.use_cpu_color_conversion { BST_CHECKED } else { BST_UNCHECKED });
+                    let _ = CheckDlgButton(hwnd, 110, if settings.use_cpu_color_conversion { BST_CHECKED } else { BST_UNCHECKED });
                 }
 
                 1
@@ -1178,9 +1213,9 @@ fn show_native_settings_dialog(
 
                     let cb_res = unsafe { GetDlgItem(Some(hwnd), 104).ok().unwrap_or(HWND::default()) };
                     let sel_res = unsafe { SendMessageW(cb_res, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0 as i32 };
-                    let modes = ["DX_NEAREST", "DX_LINEAR", "DX_CUBIC", "DX_HQC", "DX_LANCZOS"];
+                    let modes = ["Nearest", "Linear", "Cubic", "Lanczos"];
                     if sel_res >= 0 && sel_res < modes.len() as i32 {
-                        settings.resampling_mode_dx = modes[sel_res as usize].to_string();
+                        settings.resampling_mode_gpu = modes[sel_res as usize].to_string();
                     }
 
                     unsafe {

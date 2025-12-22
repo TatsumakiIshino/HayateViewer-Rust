@@ -231,7 +231,7 @@ impl ModernSettingsWindow {
 
         // 全般タブ内のクリック判定
         if self.selected_tab == 0 {
-            let items = [160.0, 200.0, 240.0, 280.0];
+            let items = [210.0, 250.0, 290.0];
             for (idx, &top) in items.iter().enumerate() {
                 let rect = D2D_RECT_F {
                     left: 40.0,
@@ -247,7 +247,7 @@ impl ModernSettingsWindow {
                 }
             }
         } else if self.selected_tab == 1 {
-            let items = [160.0, 200.0, 240.0, 280.0];
+            let items = [210.0, 250.0, 290.0, 330.0];
             for (idx, &top) in items.iter().enumerate() {
                 let rect = D2D_RECT_F {
                     left: 40.0,
@@ -429,75 +429,64 @@ impl ModernSettingsWindow {
         } else {
             None
         };
+
+        let guide_text = "■ 基本設定\n\n(※ 項目をクリック、または矢印キーとEnterで変更できます)";
+        self.draw_debug_text(guide_text, 130.0);
+
+        let display_mode_text = if !settings.is_spread_view {
+            "単一ページ"
+        } else if settings.binding_direction == "left" {
+            "見開き・左綴じ（左開き）"
+        } else {
+            "見開き・右綴じ（右開き）"
+        };
+        let first_page_text = if settings.spread_view_first_page_single {
+            "有効"
+        } else {
+            "無効"
+        };
+        let status_text = if settings.show_status_bar_info {
+            "表示"
+        } else {
+            "非表示"
+        };
+
         self.draw_button(
-            "表示モード切替",
+            "表示モード",
+            display_mode_text,
             40.0,
-            160.0,
+            210.0,
             160.0,
             30.0,
             settings.is_spread_view,
             focus_idx == Some(0),
         );
         self.draw_button(
-            "綴じ方向切替",
+            "先頭単一表示",
+            first_page_text,
             40.0,
-            200.0,
+            250.0,
             160.0,
             30.0,
-            false,
+            settings.spread_view_first_page_single,
             focus_idx == Some(1),
         );
         self.draw_button(
             "ステータスバー",
+            status_text,
             40.0,
-            240.0,
+            290.0,
             160.0,
             30.0,
             settings.show_status_bar_info,
             focus_idx == Some(2),
         );
-        self.draw_button(
-            "CPU色変換",
-            40.0,
-            280.0,
-            160.0,
-            30.0,
-            settings.use_cpu_color_conversion,
-            focus_idx == Some(3),
-        );
-
-        let binding_text = if settings.binding_direction == "left" {
-            "左綴じ (Left)"
-        } else {
-            "右綴じ (Right)"
-        };
-        let spread_text = if settings.is_spread_view {
-            "有効 (On)"
-        } else {
-            "無効 (Off)"
-        };
-
-        let text = format!(
-            "■ 基本設定\n\n表示モード: {}\n綴じ方向: {}\nステータスバー: {}\nCPU色変換: {}\n\n(※ 項目をクリックして変更できます)",
-            spread_text,
-            binding_text,
-            if settings.show_status_bar_info {
-                "表示"
-            } else {
-                "非表示"
-            },
-            if settings.use_cpu_color_conversion {
-                "有効"
-            } else {
-                "無効"
-            }
-        );
-        self.draw_debug_text(&text, 330.0);
     }
 
     fn draw_button(
         &self,
         label: &str,
+        value: &str,
         left: f32,
         top: f32,
         width: f32,
@@ -570,6 +559,31 @@ impl ModernSettingsWindow {
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
+
+            // 値の描画 (ボタンの右側)
+            if !value.is_empty() {
+                self.brush.SetColor(&D2D1_COLOR_F {
+                    r: 0.8,
+                    g: 0.8,
+                    b: 0.8,
+                    a: 1.0,
+                });
+                let wide_value: Vec<u16> = format!(": {}", value).encode_utf16().collect();
+                let val_rect = D2D_RECT_F {
+                    left: rect.right + 15.0,
+                    top: rect.top + 5.0,
+                    right: rect.right + 300.0,
+                    bottom: rect.bottom - 5.0,
+                };
+                self.context.DrawText(
+                    &wide_value,
+                    &self.text_format,
+                    &val_rect,
+                    &self.brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
         }
     }
 
@@ -580,67 +594,75 @@ impl ModernSettingsWindow {
         } else {
             None
         };
+
+        let backend_display = match settings.rendering_backend.as_str() {
+            "direct2d" => "Direct2D",
+            "direct3d11" => "Direct3D 11",
+            "opengl" => "OpenGL",
+            b => b,
+        };
+
+        let guide_text = "■ レンダリング設定\n\n(※ バックエンド変更の反映には再起動が必要です)";
+        self.draw_debug_text(guide_text, 130.0);
+
         self.draw_button(
-            "見開き表示切替",
+            "レンダリングエンジン",
+            backend_display,
             40.0,
-            160.0,
+            210.0,
             160.0,
             30.0,
-            settings.is_spread_view,
+            false,
             focus_idx == Some(0),
         );
+        let cpu_res_text = match settings.resampling_mode_cpu.as_str() {
+            "PIL_NEAREST" => "Nearest Neighbor (最近傍補間) [推奨]",
+            "PIL_BILINEAR" => "Bilinear (双線形補間)",
+            "PIL_BICUBIC" => "Bicubic (双三次補間)",
+            "PIL_LANCZOS" => "Lanczos3 (ランツォシュ)",
+            _ => &settings.resampling_mode_cpu,
+        };
         self.draw_button(
-            "先頭単一表示",
+            "CPUサンプリング",
+            cpu_res_text,
             40.0,
-            200.0,
+            250.0,
             160.0,
             30.0,
-            settings.spread_view_first_page_single,
+            false,
             focus_idx == Some(1),
         );
+        let gpu_res_text = match settings.resampling_mode_gpu.as_str() {
+            "Nearest" => "Nearest Neighbor (最近傍補間)",
+            "Linear" => "Bilinear (双線形補間)",
+            "Cubic" => "Bicubic (双三次補間)",
+            "Lanczos" => "Lanczos3 (ランツォシュ) [最高品質]",
+            _ => &settings.resampling_mode_gpu,
+        };
         self.draw_button(
-            "CPUリサンプリング",
+            "GPUサンプリング",
+            gpu_res_text,
             40.0,
-            240.0,
+            290.0,
             160.0,
             30.0,
             false,
             focus_idx == Some(2),
         );
         self.draw_button(
-            "GPUリサンプリング",
+            "CPU色変換",
+            if settings.use_cpu_color_conversion {
+                "有効"
+            } else {
+                "無効"
+            },
             40.0,
-            280.0,
+            330.0,
             160.0,
             30.0,
-            false,
+            settings.use_cpu_color_conversion,
             focus_idx == Some(3),
         );
-
-        let backend = match settings.rendering_backend.as_str() {
-            "direct2d" => "Direct2D (推奨)",
-            "d3d11" => "Direct3D 11",
-            "opengl" => "OpenGL",
-            _ => &settings.rendering_backend,
-        };
-
-        let text = format!(
-            "■ レンダリング設定\n\nバックエンド: {}\n見開き表示: {}\n先頭単一: {}\nCPUサンプリング: {}\nGPUサンプリング: {}\n\n(※ 項目をクリックして変更。バックエンド変更は再起動が必要)",
-            backend,
-            if settings.is_spread_view {
-                "有効"
-            } else {
-                "無効"
-            },
-            if settings.spread_view_first_page_single {
-                "有効"
-            } else {
-                "無効"
-            },
-            settings.resampling_mode_cpu,
-            settings.resampling_mode_gl
-        );
-        self.draw_debug_text(&text, 330.0);
     }
 
     fn draw_about_tab(&self) {
@@ -680,8 +702,8 @@ impl ModernSettingsWindow {
 
     fn get_item_count(&self) -> usize {
         match self.selected_tab {
-            0 => 4, // 全般: 表示モード, 綴じ方向, ステータスバー, CPU色変換
-            1 => 4, // レンダリング: 見開き, 先頭単一, CPUサンプリング, GPUサンプリング
+            0 => 3, // 全般: 表示モード, 先頭単一, ステータスバー
+            1 => 4, // レンダリング: エンジン, CPUサンプリング, GPUサンプリング, CPU色変換
             _ => 0,
         }
     }
@@ -692,31 +714,7 @@ impl ModernSettingsWindow {
                 0 => {
                     let _ = self
                         .event_proxy
-                        .send_event(crate::image::loader::UserEvent::ToggleSpreadView);
-                }
-                1 => {
-                    let _ = self
-                        .event_proxy
-                        .send_event(crate::image::loader::UserEvent::ToggleBindingDirection);
-                }
-                2 => {
-                    let _ = self
-                        .event_proxy
-                        .send_event(crate::image::loader::UserEvent::ToggleStatusBar);
-                }
-                3 => {
-                    let _ = self
-                        .event_proxy
-                        .send_event(crate::image::loader::UserEvent::ToggleCpuColorConversion);
-                }
-                _ => {}
-            }
-        } else if self.selected_tab == 1 {
-            match index {
-                0 => {
-                    let _ = self
-                        .event_proxy
-                        .send_event(crate::image::loader::UserEvent::ToggleSpreadView);
+                        .send_event(crate::image::loader::UserEvent::RotateDisplayMode);
                 }
                 1 => {
                     let _ = self
@@ -726,12 +724,31 @@ impl ModernSettingsWindow {
                 2 => {
                     let _ = self
                         .event_proxy
+                        .send_event(crate::image::loader::UserEvent::ToggleStatusBar);
+                }
+                _ => {}
+            }
+        } else if self.selected_tab == 1 {
+            match index {
+                0 => {
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::RotateRenderingBackend);
+                }
+                1 => {
+                    let _ = self
+                        .event_proxy
                         .send_event(crate::image::loader::UserEvent::RotateResamplingCpu);
+                }
+                2 => {
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::RotateResamplingGpu);
                 }
                 3 => {
                     let _ = self
                         .event_proxy
-                        .send_event(crate::image::loader::UserEvent::RotateResamplingGpu);
+                        .send_event(crate::image::loader::UserEvent::ToggleCpuColorConversion);
                 }
                 _ => {}
             }

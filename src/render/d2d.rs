@@ -1,13 +1,13 @@
 use std::mem::ManuallyDrop;
 use windows::{
-    core::*, Win32::Foundation::*, Win32::Graphics::Direct2D::Common::*, Win32::Graphics::Direct2D::*,
-    Win32::Graphics::Direct3D::*, Win32::Graphics::Direct3D11::*, Win32::Graphics::Dxgi::Common::*,
-    Win32::Graphics::Dxgi::*, Win32::Graphics::DirectWrite::*,
+    Win32::Foundation::*, Win32::Graphics::Direct2D::Common::*, Win32::Graphics::Direct2D::*,
+    Win32::Graphics::Direct3D::*, Win32::Graphics::Direct3D11::*, Win32::Graphics::DirectWrite::*,
+    Win32::Graphics::Dxgi::Common::*, Win32::Graphics::Dxgi::*, core::*,
 };
 type D3DResult<T> = windows::core::Result<T>;
 
+use super::{InterpolationMode, Renderer, TextureHandle};
 use crate::image::cache::{DecodedImage, PixelData};
-use super::{Renderer, TextureHandle, InterpolationMode};
 
 // 旧トレイト定義は削除
 
@@ -25,12 +25,23 @@ pub struct D2DRenderer {
 }
 
 impl Renderer for D2DRenderer {
-    fn resize(&self, width: u32, height: u32) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn resize(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let res: windows::core::Result<()> = unsafe {
             self.context.SetTarget(None);
-            self.swap_chain.ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0))?;
+            self.swap_chain.ResizeBuffers(
+                0,
+                width,
+                height,
+                DXGI_FORMAT_UNKNOWN,
+                DXGI_SWAP_CHAIN_FLAG(0),
+            )?;
             let surface: IDXGISurface = self.swap_chain.GetBuffer(0)?;
-            let back_buffer: ID2D1Bitmap1 = self.context.CreateBitmapFromDxgiSurface(&surface, None)?;
+            let back_buffer: ID2D1Bitmap1 =
+                self.context.CreateBitmapFromDxgiSurface(&surface, None)?;
             self.context.SetTarget(&back_buffer);
             Ok(())
         };
@@ -40,7 +51,12 @@ impl Renderer for D2DRenderer {
     fn begin_draw(&self) {
         unsafe {
             self.context.BeginDraw();
-            self.context.Clear(Some(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 0.8 }));
+            self.context.Clear(Some(&D2D1_COLOR_F {
+                r: 0.1,
+                g: 0.1,
+                b: 0.1,
+                a: 0.8,
+            }));
         }
     }
 
@@ -52,15 +68,18 @@ impl Renderer for D2DRenderer {
         res.map_err(|e| e.into())
     }
 
-    fn upload_image(&self, image: &DecodedImage) -> std::result::Result<TextureHandle, Box<dyn std::error::Error>> {
+    fn upload_image(
+        &self,
+        image: &DecodedImage,
+    ) -> std::result::Result<TextureHandle, Box<dyn std::error::Error>> {
         match image.pixel_data {
             PixelData::Rgba8(ref data) => {
-                let bitmap: ID2D1Bitmap1 = self.create_bitmap(image.width, image.height, data).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                let bitmap: ID2D1Bitmap1 = self
+                    .create_bitmap(image.width, image.height, data)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
                 Ok(TextureHandle::Direct2D(bitmap))
             }
-            PixelData::Ycbcr { .. } => {
-                Err("YCbCr upload not yet implemented for D2D".into())
-            }
+            PixelData::Ycbcr { .. } => Err("YCbCr upload not yet implemented for D2D".into()),
         }
     }
 
@@ -97,11 +116,11 @@ impl Renderer for D2DRenderer {
         }
     }
 
-
     fn draw_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, stroke_width: f32) {
         unsafe {
             self.brush.SetColor(color);
-            self.context.DrawRectangle(rect, &self.brush, stroke_width, None);
+            self.context
+                .DrawRectangle(rect, &self.brush, stroke_width, None);
         }
     }
 
@@ -109,7 +128,11 @@ impl Renderer for D2DRenderer {
         unsafe {
             self.brush.SetColor(color);
             let wide_text: Vec<u16> = text.encode_utf16().collect();
-            let format = if large { &self.text_format_large } else { &self.text_format };
+            let format = if large {
+                &self.text_format_large
+            } else {
+                &self.text_format
+            };
             self.context.DrawText(
                 &wide_text,
                 format,
@@ -126,17 +149,20 @@ impl Renderer for D2DRenderer {
             InterpolationMode::NearestNeighbor => D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
             InterpolationMode::Linear => D2D1_INTERPOLATION_MODE_LINEAR,
             InterpolationMode::Cubic => D2D1_INTERPOLATION_MODE_CUBIC,
-            InterpolationMode::HighQualityCubic => D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-            InterpolationMode::Lanczos => D2D1_INTERPOLATION_MODE_CUBIC, // D2D1_INTERPOLATION_MODE_CUBIC または将来的に対応
+            InterpolationMode::Lanczos => D2D1_INTERPOLATION_MODE_CUBIC, // 暫定
         };
     }
 
     fn set_text_alignment(&self, alignment: DWRITE_TEXT_ALIGNMENT) {
         unsafe {
             let _ = self.text_format.SetTextAlignment(alignment);
-            let _ = self.text_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let _ = self
+                .text_format
+                .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             let _ = self.text_format_large.SetTextAlignment(alignment);
-            let _ = self.text_format_large.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let _ = self
+                .text_format_large
+                .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
     }
 }
@@ -161,7 +187,8 @@ impl D2DRenderer {
             let dxgi_device: IDXGIDevice = d3d_device.cast()?;
 
             // Direct2D デバイスとコンテキストの作成
-            let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+            let factory: ID2D1Factory1 =
+                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let device = factory.CreateDevice(&dxgi_device)?;
             let context = device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
 
@@ -172,7 +199,10 @@ impl D2DRenderer {
                 Height: 0,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 Stereo: false.into(),
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 BufferCount: 2,
                 Scaling: DXGI_SCALING_STRETCH,
@@ -181,7 +211,13 @@ impl D2DRenderer {
                 Flags: 0,
             };
 
-            let swap_chain = dxgi_factory.CreateSwapChainForHwnd(&d3d_device, hwnd, &swap_chain_desc, None, None)?;
+            let swap_chain = dxgi_factory.CreateSwapChainForHwnd(
+                &d3d_device,
+                hwnd,
+                &swap_chain_desc,
+                None,
+                None,
+            )?;
 
             // レンダーターゲットの設定
             let surface: IDXGISurface = swap_chain.GetBuffer(0)?;
@@ -210,7 +246,15 @@ impl D2DRenderer {
                 w!("ja-jp"),
             )?;
 
-            let brush = context.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?;
+            let brush = context.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                None,
+            )?;
 
             Ok(Self {
                 _factory: factory,

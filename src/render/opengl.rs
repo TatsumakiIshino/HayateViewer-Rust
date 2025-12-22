@@ -27,6 +27,7 @@ pub struct OpenGLRenderer {
     u_is_ycbcr: UniformLocation,
     u_ui_color: UniformLocation,
     u_is_ui: UniformLocation,
+    interpolation_mode: InterpolationMode,
 }
 
 impl OpenGLRenderer {
@@ -186,6 +187,7 @@ impl OpenGLRenderer {
                 u_is_ycbcr,
                 u_is_ui,
                 u_ui_color,
+                interpolation_mode: InterpolationMode::Linear,
             })
         }
     }
@@ -210,10 +212,14 @@ impl OpenGLRenderer {
                 FLOAT,
                 Some(bytemuck::cast_slice(data)),
             );
+            let filter = match self.interpolation_mode {
+                InterpolationMode::NearestNeighbor => NEAREST as i32,
+                _ => LINEAR as i32,
+            };
             self.gl
-                .tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, LINEAR as i32);
+                .tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, filter);
             self.gl
-                .tex_parameter_i32(TEXTURE_2D, TEXTURE_MAG_FILTER, LINEAR as i32);
+                .tex_parameter_i32(TEXTURE_2D, TEXTURE_MAG_FILTER, filter);
             self.gl
                 .tex_parameter_i32(TEXTURE_2D, TEXTURE_WRAP_S, CLAMP_TO_EDGE as i32);
             self.gl
@@ -242,10 +248,14 @@ impl OpenGLRenderer {
                 UNSIGNED_BYTE,
                 Some(data),
             );
+            let filter = match self.interpolation_mode {
+                InterpolationMode::NearestNeighbor => NEAREST as i32,
+                _ => LINEAR as i32,
+            };
             self.gl
-                .tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, LINEAR as i32);
+                .tex_parameter_i32(TEXTURE_2D, TEXTURE_MIN_FILTER, filter);
             self.gl
-                .tex_parameter_i32(TEXTURE_2D, TEXTURE_MAG_FILTER, LINEAR as i32);
+                .tex_parameter_i32(TEXTURE_2D, TEXTURE_MAG_FILTER, filter);
             self.gl
                 .tex_parameter_i32(TEXTURE_2D, TEXTURE_WRAP_S, CLAMP_TO_EDGE as i32);
             self.gl
@@ -445,6 +455,8 @@ impl Renderer for OpenGLRenderer {
         // println!("[OpenGL UI] {}", text);
     }
 
-    fn set_interpolation_mode(&mut self, _mode: InterpolationMode) {}
+    fn set_interpolation_mode(&mut self, mode: InterpolationMode) {
+        self.interpolation_mode = mode;
+    }
     fn set_text_alignment(&self, _alignment: DWRITE_TEXT_ALIGNMENT) {}
 }

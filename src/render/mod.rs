@@ -13,7 +13,10 @@ pub trait Renderer: Send + Sync {
     fn begin_draw(&self);
     fn end_draw(&self) -> Result<(), Box<dyn std::error::Error>>;
 
-    fn upload_image(&self, image: &DecodedImage) -> std::result::Result<TextureHandle, Box<dyn std::error::Error>>;
+    fn upload_image(
+        &self,
+        image: &DecodedImage,
+    ) -> std::result::Result<TextureHandle, Box<dyn std::error::Error>>;
 
     /// 抽象化されたテクスチャを描画
     fn draw_image(&self, texture: &TextureHandle, dest_rect: &D2D_RECT_F);
@@ -24,10 +27,10 @@ pub trait Renderer: Send + Sync {
     /// 基本的な図形描画
     fn fill_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F);
     fn draw_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, stroke_width: f32);
-    
+
     // ネイティブダイアログ移行に伴い draw_text, fill_rounded_rectangle は廃止予定
     fn draw_text(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, large: bool);
-    
+
     fn set_interpolation_mode(&mut self, mode: InterpolationMode);
     fn set_text_alignment(&self, alignment: DWRITE_TEXT_ALIGNMENT);
 }
@@ -67,10 +70,16 @@ impl DialogTemplate {
             style,
             dw_ext_style: 0,
             c_dit: 0,
-            x, y, cx, cy,
+            x,
+            y,
+            cx,
+            cy,
         };
         data.extend_from_slice(unsafe {
-            std::slice::from_raw_parts(&header as *const _ as *const u8, std::mem::size_of::<DLGTEMPLATE>())
+            std::slice::from_raw_parts(
+                &header as *const _ as *const u8,
+                std::mem::size_of::<DLGTEMPLATE>(),
+            )
         });
 
         // Menu, Class, Title
@@ -81,10 +90,23 @@ impl DialogTemplate {
         }
         data.extend_from_slice(&[0, 0]); // Null terminator
 
-        Self { data, items_count: 0 }
+        Self {
+            data,
+            items_count: 0,
+        }
     }
 
-    pub fn add_item(&mut self, class_id: u16, text: &str, id: u16, x: i16, y: i16, cx: i16, cy: i16, style: u32) {
+    pub fn add_item(
+        &mut self,
+        class_id: u16,
+        text: &str,
+        id: u16,
+        x: i16,
+        y: i16,
+        cx: i16,
+        cy: i16,
+        style: u32,
+    ) {
         // DWORD alignment
         while self.data.len() % 4 != 0 {
             self.data.push(0);
@@ -93,10 +115,17 @@ impl DialogTemplate {
         let item = DLGITEMTEMPLATE {
             style,
             dw_ext_style: 0,
-            x, y, cx, cy, id,
+            x,
+            y,
+            cx,
+            cy,
+            id,
         };
         self.data.extend_from_slice(unsafe {
-            std::slice::from_raw_parts(&item as *const _ as *const u8, std::mem::size_of::<DLGITEMTEMPLATE>())
+            std::slice::from_raw_parts(
+                &item as *const _ as *const u8,
+                std::mem::size_of::<DLGITEMTEMPLATE>(),
+            )
         });
 
         // Class (0xFFFF + ID)
@@ -113,7 +142,7 @@ impl DialogTemplate {
         self.items_count += 1;
         // Update header count
         let count_offset = 8; // DLGTEMPLATE.c_dit is at offset 8
-        self.data[count_offset..count_offset+2].copy_from_slice(&self.items_count.to_le_bytes());
+        self.data[count_offset..count_offset + 2].copy_from_slice(&self.items_count.to_le_bytes());
     }
 }
 
@@ -162,6 +191,5 @@ pub enum InterpolationMode {
     NearestNeighbor,
     Linear,
     Cubic,
-    HighQualityCubic,
     Lanczos,
 }

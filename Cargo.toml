@@ -1,6 +1,6 @@
 [package]
 name = "hayate-viewer-rust"
-version = "0.4.5-test"
+version = "0.4.6-test"
 edition = "2024"
 
 [dependencies]

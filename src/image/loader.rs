@@ -35,6 +35,8 @@ pub enum UserEvent {
     RotateResamplingCpu,
     RotateResamplingGpu,
     ToggleStatusBar,
+    RotateRenderingBackend,
+    RotateDisplayMode,
 }
 
 pub struct AsyncLoader {
