@@ -29,21 +29,110 @@ use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 use winit::platform::windows::WindowBuilderExtWindows;
 use tokio::runtime::Runtime;
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, WPARAM, LPARAM};
+use windows::Win32::UI::Controls::{
+    InitCommonControlsEx, INITCOMMONCONTROLSEX, ICC_BAR_CLASSES, STATUSCLASSNAMEW,
+    SB_SETTEXTW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, SendMessageW, WS_CHILD, WS_VISIBLE,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_SIZE,
+};
+use windows::core::w;
 
 
-fn update_window_title(window: &winit::window::Window, _path_key: &str, app_state: &AppState) {
-    let current = app_state.current_page_index;
-    let total = app_state.image_files.len();
-    let binding = if app_state.binding_direction == BindingDirection::Right { " (右綴じ)" } else { " (左綴じ)" };
-    let spread = if app_state.is_spread_view { " [見開き]" } else { "" };
+fn update_window_title(window: &winit::window::Window, path_key: &str, app_state: &AppState) {
+    let archive_name = if !path_key.is_empty() {
+        std::path::Path::new(path_key)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| path_key.to_string())
+    } else {
+        String::new()
+    };
+
+    let display_indices = app_state.get_page_indices_to_display();
+    let mut image_names = Vec::new();
     
-    let title = if total > 0 {
-        format!("HayateViewer v{} - {} / {}{}{}", VERSION, current + 1, total, binding, spread)
+    // 見開き順（表示順）にソートしてファイル名を取得
+    let mut sorted_indices = display_indices.clone();
+    sorted_indices.sort();
+    
+    for idx in sorted_indices {
+        if let Some(path_str) = app_state.image_files.get(idx) {
+            let fname = std::path::Path::new(path_str)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| path_str.clone());
+            image_names.push(fname);
+        }
+    }
+    
+    let images_str = image_names.join(" - ");
+
+    let title_text = if !archive_name.is_empty() {
+        if !images_str.is_empty() {
+            format!("{} / {}", archive_name, images_str)
+        } else {
+            archive_name
+        }
+    } else {
+        images_str
+    };
+
+    let title = if !title_text.is_empty() {
+        format!("HayateViewer v{} - {}", VERSION, title_text)
     } else {
         format!("HayateViewer v{}", VERSION)
     };
     window.set_title(&title);
+}
+
+/// Windows システムステータスバーを作成する
+fn create_status_bar(parent_hwnd: HWND) -> Option<HWND> {
+    unsafe {
+        // Common Controls を初期化
+        let icc = INITCOMMONCONTROLSEX {
+            dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_BAR_CLASSES,
+        };
+        if !InitCommonControlsEx(&icc).as_bool() {
+            return None;
+        }
+        
+        // ステータスバーウィンドウを作成
+        let status_hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            STATUSCLASSNAMEW,
+            w!(""),
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0),
+            0, 0, 0, 0,
+            Some(parent_hwnd),
+            None,
+            None,
+            None,
+        );
+        
+        if status_hwnd.is_ok() {
+            Some(status_hwnd.unwrap())
+        } else {
+            None
+        }
+    }
+}
+
+/// ステータスバーのテキストを更新する
+fn update_status_bar_text(status_hwnd: HWND, text: &str) {
+    unsafe {
+        let mut wide_text: Vec<u16> = text.encode_utf16().collect();
+        wide_text.push(0); // null terminate
+        SendMessageW(
+            status_hwnd,
+            SB_SETTEXTW,
+            Some(WPARAM(0)), // Part 0, no flags
+            Some(LPARAM(wide_text.as_ptr() as isize)),
+        );
+    }
 }
 
 struct ViewState {
@@ -148,11 +237,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("Unsupported window handle".into()),
     };
 
-    unsafe {
-        use windows::Win32::Graphics::Dwm::*;
-        let _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &2i32 as *const _ as _, 4);
-        let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &1i32 as *const _ as _, 4);
+    // Windows システムステータスバーを作成
+    let status_bar_hwnd = create_status_bar(hwnd);
+    if status_bar_hwnd.is_some() {
+        println!("[UI] Windows システムステータスバーを作成しました");
     }
+
+
 
     println!("HayateViewer Rust を起動中...");
     use std::io::Write;
@@ -259,6 +350,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WindowEvent::Resized(physical_size) => {
                     let _ = renderer.resize(physical_size.width, physical_size.height);
+                    if let Some(sb_hwnd) = status_bar_hwnd {
+                        unsafe { SendMessageW(sb_hwnd, WM_SIZE, Some(WPARAM(0)), Some(LPARAM(0))); }
+                    }
                 }
                 WindowEvent::DroppedFile(path) => {
                     let path_str = path.to_string_lossy().to_string();
@@ -748,18 +842,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    // ステータスバーの描画
-                    let bar_h = 25.0;
-                    let bar_rect = D2D_RECT_F {
-                        left: 0.0,
-                        top: win_h - bar_h,
-                        right: win_w,
-                        bottom: win_h,
-                    };
-                    if settings.show_status_bar_info {
-                        renderer.fill_rectangle(&bar_rect, &D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.5 });
-                    }
-
+                    // ステータスバーの更新（Windows システムステータスバーを使用）
                     let total_pages = app_state.image_files.len();
                     let display_indices = app_state.get_page_indices_to_display();
                     let current_page_str = if display_indices.len() > 1 {
@@ -777,21 +860,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let gpu_indices: Vec<usize> = current_bitmaps.iter().map(|(idx, _)| *idx).collect();
 
                     let path_preview: String = current_path_key.chars().take(20).collect();
-                    let status_text = format!(
-                        " Page: {} / {} | Backend: {} | CPU: {}p {} | GPU: {}p {} | Key: {}",
-                        current_page_str,
-                        total_pages,
-                        get_backend_display_name(&settings.rendering_backend),
-                        cpu_indices.len(),
-                        format_page_list(&cpu_indices, app_state.current_page_index),
-                        gpu_indices.len(),
-                        format_page_list(&gpu_indices, app_state.current_page_index),
-                        path_preview
-                    );
-                    if settings.show_status_bar_info {
-                        renderer.draw_text(&status_text, &bar_rect, &D2D1_COLOR_F { r: 0.9, g: 0.9, b: 0.9, a: 1.0 }, false);
+                    
+                    let spread_info = if app_state.is_spread_view {
+                        let binding = if app_state.binding_direction == BindingDirection::Right { "右" } else { "左" };
+                        format!("[見開き:{}]", binding)
+                    } else {
+                        "[単ページ]".to_string()
+                    };
+
+                    let status_text = if settings.show_status_bar_info {
+                        format!(
+                            "Page: {} / {} {} | Backend: {} | CPU: {}p {} | GPU: {}p {} | Key: {}",
+                            current_page_str,
+                            total_pages,
+                            spread_info,
+                            get_backend_display_name(&settings.rendering_backend),
+                            cpu_indices.len(),
+                            format_page_list(&cpu_indices, app_state.current_page_index),
+                            gpu_indices.len(),
+                            format_page_list(&gpu_indices, app_state.current_page_index),
+                            path_preview
+                        )
+                    } else {
+                        // 簡易表示（キャッシュ詳細なし）
+                        format!(
+                            "Page: {} / {} {} | Backend: {} | Key: {}",
+                            current_page_str,
+                            total_pages,
+                            spread_info,
+                            get_backend_display_name(&settings.rendering_backend),
+                            path_preview
+                        )
+                    };
+
+                    // ステータスバーは常に更新
+                    if let Some(sb_hwnd) = status_bar_hwnd {
+                        update_status_bar_text(sb_hwnd, &status_text);
                     }
 
+                    // タイトルバー更新（ファイル名を表示、解像度はTODO）
                     update_window_title(&window, &current_path_key, &app_state);
 
                     // ページジャンプオーバーレイの描画
@@ -848,7 +955,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // シークバーの描画
                     if app_state.show_seekbar && total_pages > 0 {
                         let bar_height = if app_state.is_dragging_seekbar { 12.0 } else { 8.0 };
-                        let bar_y = if settings.show_status_bar_info { win_h - bar_h - bar_height } else { win_h - bar_height };
+                        let status_bar_height = 22.0; // Windows システムステータスバーの高さ
+                        let bar_y = win_h - status_bar_height - bar_height;
                         let full_rect = D2D_RECT_F {
                             left: 0.0,
                             top: bar_y,
