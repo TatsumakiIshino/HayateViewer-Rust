@@ -21,6 +21,7 @@ pub struct D3D11Renderer {
     pub text_format: IDWriteTextFormat,
     pub text_format_large: IDWriteTextFormat,
     pub interpolation_mode: D2D1_INTERPOLATION_MODE,
+    pub shader_interpolation_mode: i32, // 0=Nearest, 1=Linear, 2=Cubic, 3=Lanczos
 
     // D3D11 Resources
     vertex_shader: ID3D11VertexShader,
@@ -47,6 +48,8 @@ struct YCbCrConstants {
     color_matrix: [[f32; 4]; 4],
     offset: [f32; 4],
     scale: [f32; 4],
+    interpolation_mode: i32,
+    _padding: [i32; 3], // 16バイトアライメント用パディング
 }
 
 fn compile_shader(source: &[u8], entry_point: &str, target: &str) -> Result<ID3DBlob> {
@@ -285,6 +288,8 @@ impl Renderer for D3D11Renderer {
                         ],
                         offset: [y_offset, c_offset, c_offset, 0.0],
                         scale: [scale_val, scale_val, scale_val, 1.0],
+                        interpolation_mode: self.shader_interpolation_mode,
+                        _padding: [0, 0, 0],
                     };
 
                     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
@@ -368,7 +373,13 @@ impl Renderer for D3D11Renderer {
             InterpolationMode::NearestNeighbor => D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
             InterpolationMode::Linear => D2D1_INTERPOLATION_MODE_LINEAR,
             InterpolationMode::Cubic => D2D1_INTERPOLATION_MODE_CUBIC,
-            InterpolationMode::Lanczos => D2D1_INTERPOLATION_MODE_CUBIC, // 暫定
+            InterpolationMode::Lanczos => D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, // D2D用フォールバック
+        };
+        self.shader_interpolation_mode = match mode {
+            InterpolationMode::NearestNeighbor => 0,
+            InterpolationMode::Linear => 1,
+            InterpolationMode::Cubic => 2,
+            InterpolationMode::Lanczos => 3,
         };
     }
 
@@ -649,6 +660,7 @@ impl D3D11Renderer {
                 text_format,
                 text_format_large,
                 interpolation_mode: D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                shader_interpolation_mode: 2, // デフォルトは Cubic
 
                 vertex_shader,
                 input_layout,

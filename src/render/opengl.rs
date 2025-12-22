@@ -27,6 +27,8 @@ pub struct OpenGLRenderer {
     u_is_ycbcr: UniformLocation,
     u_ui_color: UniformLocation,
     u_is_ui: UniformLocation,
+    u_interpolation_mode: UniformLocation,
+    u_source_texture_size: UniformLocation,
     interpolation_mode: InterpolationMode,
 }
 
@@ -75,22 +77,119 @@ impl OpenGLRenderer {
                 uniform int isYCbCr; // bool ではなく int を使用 (互換性のため)
                 uniform int isUI;
                 uniform vec4 uiColor;
+                uniform int interpolationMode; // 0=Nearest, 1=Linear, 2=Cubic, 3=Lanczos
+                uniform vec2 sourceTextureSize;
+
+                const float PI = 3.14159265359;
+
+                // Cubic (Catmull-Rom) weight function
+                float cubic_weight(float x) {
+                    x = abs(x);
+                    float x2 = x * x;
+                    float x3 = x2 * x;
+                    if (x <= 1.0) {
+                        return 1.5 * x3 - 2.5 * x2 + 1.0;
+                    } else if (x <= 2.0) {
+                        return -0.5 * x3 + 2.5 * x2 - 4.0 * x + 2.0;
+                    }
+                    return 0.0;
+                }
+
+                // Lanczos weight function (a=3)
+                float lanczos_weight(float x) {
+                    if (x == 0.0) return 1.0;
+                    x = abs(x);
+                    if (x < 3.0) {
+                        float pix = PI * x;
+                        return sin(pix) * sin(pix / 3.0) / (pix * pix / 3.0);
+                    }
+                    return 0.0;
+                }
+
+                // サンプル関数 (YCbCr or RGBA に応じて分岐)
+                vec4 sampleTexture(vec2 uv) {
+                    if (isYCbCr != 0) {
+                        float y = texture(texY, uv).r;
+                        float cb = texture(texCb, uv).r;
+                        float cr = texture(texCr, uv).r;
+                        vec4 ycbcr = vec4(y, cb, cr, 1.0);
+                        ycbcr = ycbcr + offset;
+                        vec4 rgba = colorMatrix * ycbcr;
+                        rgba.a = 1.0;
+                        return clamp(rgba, 0.0, 1.0);
+                    } else {
+                        return texture(texY, uv);
+                    }
+                }
+
+                // Cubic 補間 (4x4 サンプリング)
+                vec4 sampleCubic(vec2 uv) {
+                    vec2 texelSize = 1.0 / sourceTextureSize;
+                    vec2 pixelPos = uv * sourceTextureSize - 0.5;
+                    vec2 fracPart = fract(pixelPos);
+                    vec2 basePos = (floor(pixelPos) + 0.5) * texelSize;
+
+                    vec4 color = vec4(0.0);
+                    float totalWeight = 0.0;
+
+                    for (int j = -1; j <= 2; j++) {
+                        for (int i = -1; i <= 2; i++) {
+                            vec2 sampleUV = basePos + vec2(float(i), float(j)) * texelSize;
+                            sampleUV = clamp(sampleUV, vec2(0.0), vec2(1.0));
+                            
+                            float wx = cubic_weight(float(i) - fracPart.x);
+                            float wy = cubic_weight(float(j) - fracPart.y);
+                            float w = wx * wy;
+                            
+                            color += sampleTexture(sampleUV) * w;
+                            totalWeight += w;
+                        }
+                    }
+                    return color / max(totalWeight, 0.001);
+                }
+
+                // Lanczos3 補間 (6x6 サンプリング)
+                vec4 sampleLanczos(vec2 uv) {
+                    vec2 texelSize = 1.0 / sourceTextureSize;
+                    vec2 pixelPos = uv * sourceTextureSize - 0.5;
+                    vec2 fracPart = fract(pixelPos);
+                    vec2 basePos = (floor(pixelPos) + 0.5) * texelSize;
+
+                    vec4 color = vec4(0.0);
+                    float totalWeight = 0.0;
+
+                    for (int j = -2; j <= 3; j++) {
+                        for (int i = -2; i <= 3; i++) {
+                            vec2 sampleUV = basePos + vec2(float(i), float(j)) * texelSize;
+                            sampleUV = clamp(sampleUV, vec2(0.0), vec2(1.0));
+                            
+                            float wx = lanczos_weight(float(i) - fracPart.x);
+                            float wy = lanczos_weight(float(j) - fracPart.y);
+                            float w = wx * wy;
+                            
+                            color += sampleTexture(sampleUV) * w;
+                            totalWeight += w;
+                        }
+                    }
+                    return color / max(totalWeight, 0.001);
+                }
+
                 void main() {
                     if (isUI != 0) {
                         FragColor = uiColor;
                         return;
                     }
-                    if (isYCbCr != 0) {
-                        float y = texture(texY, TexCoord).r;
-                        float cb = texture(texCb, TexCoord).r;
-                        float cr = texture(texCr, TexCoord).r;
-                        vec4 ycbcr = vec4(y, cb, cr, 1.0);
-                        ycbcr = ycbcr + offset;
-                        vec4 rgba = colorMatrix * ycbcr;
-                        rgba.a = 1.0;
-                        FragColor = clamp(rgba, 0.0, 1.0);
+                    
+                    // 補間モードに応じてサンプリング
+                    if (interpolationMode == 3) {
+                        // Lanczos3
+                        FragColor = sampleLanczos(TexCoord);
+                    } else if (interpolationMode == 2) {
+                        // Cubic
+                        FragColor = sampleCubic(TexCoord);
                     } else {
-                        FragColor = texture(texY, TexCoord);
+                        // Nearest (0) / Linear (1) - ハードウェアサンプラーに任せる
+                        FragColor = sampleTexture(TexCoord);
                     }
                 }
             "#;
@@ -152,6 +251,12 @@ impl OpenGLRenderer {
             let u_ui_color = gl
                 .get_uniform_location(program, "uiColor")
                 .ok_or("Uniform uiColor not found")?;
+            let u_interpolation_mode = gl
+                .get_uniform_location(program, "interpolationMode")
+                .ok_or("Uniform interpolationMode not found")?;
+            let u_source_texture_size = gl
+                .get_uniform_location(program, "sourceTextureSize")
+                .ok_or("Uniform sourceTextureSize not found")?;
 
             // Quad Setup
             let vao = gl.create_vertex_array()?;
@@ -187,6 +292,8 @@ impl OpenGLRenderer {
                 u_is_ycbcr,
                 u_is_ui,
                 u_ui_color,
+                u_interpolation_mode,
+                u_source_texture_size,
                 interpolation_mode: InterpolationMode::Linear,
             })
         }
@@ -360,9 +467,24 @@ impl Renderer for OpenGLRenderer {
                 dest_rect.bottom,
             );
 
+            // 補間モードをシェーダーに渡す
+            let mode_int = match self.interpolation_mode {
+                InterpolationMode::NearestNeighbor => 0,
+                InterpolationMode::Linear => 1,
+                InterpolationMode::Cubic => 2,
+                InterpolationMode::Lanczos => 3,
+            };
+            self.gl
+                .uniform_1_i32(Some(&self.u_interpolation_mode), mode_int);
+
             match texture {
-                TextureHandle::OpenGL { id, .. } => {
+                TextureHandle::OpenGL { id, width, height } => {
                     self.gl.uniform_1_i32(Some(&self.u_is_ycbcr), 0);
+                    self.gl.uniform_2_f32(
+                        Some(&self.u_source_texture_size),
+                        *width as f32,
+                        *height as f32,
+                    );
                     self.gl.active_texture(TEXTURE0);
                     let tex: Texture = std::mem::transmute_copy::<u32, Texture>(id);
                     self.gl.bind_texture(TEXTURE_2D, Some(tex));
@@ -372,11 +494,18 @@ impl Renderer for OpenGLRenderer {
                     y,
                     cb,
                     cr,
+                    width,
+                    height,
                     y_is_signed,
                     c_is_signed,
                     ..
                 } => {
                     self.gl.uniform_1_i32(Some(&self.u_is_ycbcr), 1);
+                    self.gl.uniform_2_f32(
+                        Some(&self.u_source_texture_size),
+                        *width as f32,
+                        *height as f32,
+                    );
                     let y_offset = if *y_is_signed { 0.5 } else { 0.0 };
                     let c_offset = if *c_is_signed { 0.0 } else { -0.5 };
                     let matrix = [
