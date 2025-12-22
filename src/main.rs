@@ -29,10 +29,8 @@ use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 use winit::platform::windows::WindowBuilderExtWindows;
 use tokio::runtime::Runtime;
 
-use windows::Win32::Foundation::{HWND, WPARAM, LPARAM};
-use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::Win32::UI::Controls::*;
-use crate::render::DialogTemplate;
+use windows::Win32::Foundation::HWND;
+
 
 fn update_window_title(window: &winit::window::Window, _path_key: &str, app_state: &AppState) {
     let current = app_state.current_page_index;
@@ -336,34 +334,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 return;
                             }
                             
-                            if modifiers.shift_key() {
-                                // ネイティブダイアログを表示
-                                let proxy_clone = proxy.clone();
-                                show_native_settings_dialog(hwnd, &mut settings, &app_state, &proxy_clone, &window, &renderer, &rt, &cpu_cache, &current_path_key, elwt);
-                                last_dialog_close = std::time::Instant::now();
-                            } else {
-                                if modern_settings.is_none() {
-                                    match ui::modern_settings::ModernSettingsWindow::new(elwt, hwnd, &settings, proxy.clone()) {
-                                        Ok(mw) => {
-                                            modern_settings = Some(mw);
-                                        }
-                                        Err(e) => {
-                                            println!("Failed to open Modern UI: {:?}", e);
-                                            // フォールバック
-                                            let proxy_clone = proxy.clone();
-                                            show_native_settings_dialog(hwnd, &mut settings, &app_state, &proxy_clone, &window, &renderer, &rt, &cpu_cache, &current_path_key, elwt);
-                                        }
+                            if modern_settings.is_none() {
+                                match ui::modern_settings::ModernSettingsWindow::new(elwt, hwnd, &settings, proxy.clone()) {
+                                    Ok(mw) => {
+                                        modern_settings = Some(mw);
+                                    }
+                                    Err(e) => {
+                                        println!("Failed to open Modern UI: {:?}", e);
                                     }
                                 }
-                                last_dialog_close = std::time::Instant::now();
                             }
+                            last_dialog_close = std::time::Instant::now();
                         }
                         Key::Character(ref s) if s.to_lowercase() == "s" => {
                             if modifiers.shift_key() {
                                 // Shift + S: ページジャンプを開く
                                 app_state.is_jump_open = true;
                                 app_state.jump_input_buffer.clear();
-                                app_state.is_options_open = false;
+
                             } else {
                                 // S: シークバー切り替え
                                 app_state.show_seekbar = !app_state.show_seekbar;
@@ -386,7 +374,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                         }
                         Key::Character(ref s) if s.to_lowercase() == "b" => {
-                            if !app_state.is_options_open {
                                 if !app_state.is_spread_view {
                                     app_state.is_spread_view = true;
                                     app_state.binding_direction = BindingDirection::Right;
@@ -395,9 +382,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     app_state.is_spread_view = false;
                                 }
-                                view_state.reset();
-                                request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
-                            }
                         }
                         Key::Named(NamedKey::Escape) => {
                             if app_state.is_jump_open {
@@ -406,7 +390,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         Key::Character(ref s) if s == "[" || s == "]" => {
-                            if !app_state.is_options_open && !app_state.is_jump_open {
+                            if !app_state.is_jump_open {
                                 let direction = if s == "]" { 1 } else { -1 };
                                 if let Some(new_path) = get_neighboring_source(&current_path_key, direction) {
                                     println!("フォルダ/アーカイブ移動: {}", new_path);
@@ -880,10 +864,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         renderer.fill_rectangle(&progress_rect, &bar_color);
                     }
 
-                    // 設定オーバーレイ（廃止）
-                    if app_state.is_options_open {
-                        // 描画は行わず、ダイアログ表示フラグの管理のみ
-                    }
+
 
                     let _ = renderer.end_draw();
                 }
@@ -1053,229 +1034,7 @@ fn init_opengl(window: &Arc<winit::window::Window>) -> Result<crate::render::ope
     crate::render::opengl::OpenGLRenderer::new(Arc::new(gl), gl_context, gl_surface)
 }
 
-fn show_native_settings_dialog(
-    parent: HWND,
-    settings: &mut Settings,
-    _app_state: &AppState,
-    _proxy: &winit::event_loop::EventLoopProxy<UserEvent>,
-    window: &winit::window::Window,
-    _renderer: &Box<dyn Renderer>,
-    _rt: &Runtime,
-    cpu_cache: &SharedImageCache,
-    _current_path_key: &str,
-    elwt: &winit::event_loop::EventLoopWindowTarget<UserEvent>
-) {
-    println!("DEBUG: show_native_settings_dialog called");
-    let mut temp_settings = settings.clone();
-    // ダイアログテンプレートの構築
-    let style = 0x0080 | WS_POPUP.0 | WS_CAPTION.0 | WS_SYSMENU.0; // 0x40 (DS_SETFONT) removed to fix crash
-    let mut t = DialogTemplate::new("設定 - HayateViewer", 0, 0, 240, 310, style as u32);
-    
-    // ダイアログ項目のID定義
-    const ID_BACKEND: u16 = 101;
-    const ID_SPREAD: u16 = 102;
-    const ID_BINDING: u16 = 103;
-    const ID_RESAMPLING: u16 = 104;
-    const ID_CACHE_SIZE: u16 = 105;
-    const ID_CPU_PREFETCH: u16 = 106;
-    const ID_GPU_PREFETCH: u16 = 107;
-    const ID_STATUS_BAR: u16 = 108;
-    const ID_THREADS: u16 = 109;
-    const ID_COLOR_CONV: u16 = 110;
-    
-    let mut y = 10;
-    let label_x = 10;
-    let ctrl_x = 110;
-    let row_h = 22;
 
-    let s_left = WS_VISIBLE.0 as u32 | 0 | WS_CHILD.0 as u32; // 0 == SS_LEFT
-    let s_combo = WS_VISIBLE.0 as u32 | 0x0003 | WS_VSCROLL.0 as u32 | WS_TABSTOP.0 as u32 | WS_CHILD.0 as u32; // 0x0003 == CBS_DROPDOWNLIST
-    let s_check = WS_VISIBLE.0 as u32 | 0x0003 | WS_TABSTOP.0 as u32 | WS_CHILD.0 as u32; // 0x0003 == BS_AUTOCHECKBOX
-    let s_edit = WS_VISIBLE.0 as u32 | 0 | 0x0080 | 0x2000 | WS_BORDER.0 as u32 | WS_TABSTOP.0 as u32 | WS_CHILD.0 as u32; // 0 == ES_LEFT, 0x0080 == ES_AUTOHSCROLL, 0x2000 == ES_NUMBER
-    let s_ok = WS_VISIBLE.0 as u32 | 0x0001 | WS_TABSTOP.0 as u32 | WS_CHILD.0 as u32; // 0x0001 == BS_DEFPUSHBUTTON
-    let s_cancel = WS_VISIBLE.0 as u32 | 0 | WS_TABSTOP.0 as u32 | WS_CHILD.0 as u32; // 0 == BS_PUSHBUTTON
-
-    t.add_item(0x0082, "レンダリング:", 1001, label_x, y, 90, 12, s_left);
-    t.add_item(0x0085, "", ID_BACKEND, ctrl_x, y - 2, 120, 100, s_combo);
-    y += row_h;
-
-    t.add_item(0x0080, "見開き表示", ID_SPREAD, label_x, y, 90, 12, s_check);
-    y += row_h;
-
-    t.add_item(0x0085, "綴じ方向:", 1002, label_x, y, 90, 12, s_left);
-    t.add_item(0x0085, "", ID_BINDING, ctrl_x, y - 2, 120, 60, s_combo);
-    y += row_h;
-
-    t.add_item(0x0082, "補間モード:", 1003, label_x, y, 90, 12, s_left);
-    t.add_item(0x0085, "", ID_RESAMPLING, ctrl_x, y - 2, 120, 100, s_combo);
-    y += row_h;
-
-    t.add_item(0x0082, "キャッシュ (MB):", 1004, label_x, y, 90, 12, s_left);
-    t.add_item(0x0081, "", ID_CACHE_SIZE, ctrl_x, y - 2, 120, 12, s_edit);
-    y += row_h;
-
-    t.add_item(0x0082, "CPU先読み (枚):", 1005, label_x, y, 90, 12, s_left);
-    t.add_item(0x0081, "", ID_CPU_PREFETCH, ctrl_x, y - 2, 120, 12, s_edit);
-    y += row_h;
-
-    t.add_item(0x0082, "GPU先読み (枚):", 1006, label_x, y, 90, 12, s_left);
-    t.add_item(0x0081, "", ID_GPU_PREFETCH, ctrl_x, y - 2, 120, 12, s_edit);
-    y += row_h;
-
-    t.add_item(0x0080, "ステータスバー表示", ID_STATUS_BAR, label_x, y, 120, 12, s_check);
-    y += row_h;
-
-    t.add_item(0x0082, "デコードスレッド:", 1007, label_x, y, 90, 12, s_left);
-    t.add_item(0x0081, "", ID_THREADS, ctrl_x, y - 2, 120, 12, s_edit);
-    y += row_h;
-
-    t.add_item(0x0080, "CPU 色変換を強制", ID_COLOR_CONV, label_x, y, 120, 12, s_check);
-    y += 30;
-
-    t.add_item(0x0080, "OK", IDOK.0 as u16, 60, y, 50, 14, s_ok);
-    t.add_item(0x0080, "キャンセル", IDCANCEL.0 as u16, 130, y, 50, 14, s_cancel);
-
-    unsafe extern "system" fn dialog_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> isize {
-        match msg {
-            WM_INITDIALOG => {
-                println!("DEBUG: dialog_proc WM_INITDIALOG");
-                let settings = unsafe { &*(lparam.0 as *const Settings) };
-                unsafe { let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, lparam.0); }
-
-                // コンボボックス等の初期化
-                let cb_backend = unsafe { GetDlgItem(Some(hwnd), 101).ok().unwrap_or(HWND::default()) };
-                for name in &["direct2d", "direct3d11", "opengl"] {
-                    let display = match *name {
-                        "direct2d" => "Direct2D",
-                        "direct3d11" => "Direct3D 11",
-                        "opengl" => "OpenGL",
-                        _ => *name,
-                    };
-                    let wide_name: Vec<u16> = display.encode_utf16().chain(Some(0)).collect();
-                    let idx = unsafe { SendMessageW(cb_backend, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide_name.as_ptr() as _))).0 as i32 };
-                    if *name == settings.rendering_backend {
-                        unsafe { let _ = SendMessageW(cb_backend, CB_SETCURSEL, Some(WPARAM(idx as usize)), Some(LPARAM(0))); }
-                    }
-                }
-
-                unsafe { let _ = CheckDlgButton(hwnd, 102, if settings.is_spread_view { BST_CHECKED } else { BST_UNCHECKED }); }
-                
-                let cb_binding = unsafe { GetDlgItem(Some(hwnd), 103).ok().unwrap_or(HWND::default()) };
-                for (i, name) in ["左綴じ / 左開き", "右綴じ / 右開き"].iter().enumerate() {
-                    let wide_name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-                    unsafe { let _ = SendMessageW(cb_binding, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide_name.as_ptr() as _))); }
-                    if (i == 0 && settings.binding_direction == "left") || (i == 1 && settings.binding_direction == "right") {
-                        unsafe { let _ = SendMessageW(cb_binding, CB_SETCURSEL, Some(WPARAM(i)), Some(LPARAM(0))); }
-                    }
-                }
-
-                let cb_res = unsafe { GetDlgItem(Some(hwnd), 104).ok().unwrap_or(HWND::default()) };
-                let modes = ["Nearest", "Linear", "Cubic", "Lanczos"];
-                let mode_names = ["Nearest Neighbor (最近傍補間)", "Bilinear (双線形補間)", "Bicubic (双三次補間)", "Lanczos3 (ランツォシュ)"];
-                for (i, name) in mode_names.iter().enumerate() {
-                    let wide_name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-                    unsafe { let _ = SendMessageW(cb_res, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide_name.as_ptr() as _))); }
-                    if modes[i] == settings.resampling_mode_gpu {
-                        unsafe { let _ = SendMessageW(cb_res, CB_SETCURSEL, Some(WPARAM(i)), Some(LPARAM(0))); }
-                    }
-                }
-
-                unsafe {
-                    let _ = SetDlgItemInt(hwnd, 105, settings.max_cache_size_mb as u32, false);
-                    let _ = SetDlgItemInt(hwnd, 106, settings.cpu_max_prefetch_pages as u32, false);
-                    let _ = SetDlgItemInt(hwnd, 107, settings.gpu_max_prefetch_pages as u32, false);
-                    let _ = CheckDlgButton(hwnd, 108, if settings.show_status_bar_info { BST_CHECKED } else { BST_UNCHECKED });
-                    let _ = SetDlgItemInt(hwnd, 109, settings.parallel_decoding_workers as u32, false);
-                    let _ = CheckDlgButton(hwnd, 110, if settings.use_cpu_color_conversion { BST_CHECKED } else { BST_UNCHECKED });
-                }
-
-                1
-            }
-            WM_COMMAND => {
-                let id = loword(wparam.0 as u32);
-                if id == IDOK.0 as u16 {
-                    let settings = unsafe { &mut *(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Settings) };
-                    
-                    let cb_backend = unsafe { GetDlgItem(Some(hwnd), 101).ok().unwrap_or(HWND::default()) };
-                    let sel = unsafe { SendMessageW(cb_backend, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0 as i32 };
-                    settings.rendering_backend = match sel {
-                        0 => "direct2d".to_string(),
-                        1 => "direct3d11".to_string(),
-                        2 => "opengl".to_string(),
-                        _ => settings.rendering_backend.clone(),
-                    };
-
-                    settings.is_spread_view = unsafe { IsDlgButtonChecked(hwnd, 102) == BST_CHECKED.0 as u32 };
-                    
-                    let cb_binding = unsafe { GetDlgItem(Some(hwnd), 103).ok().unwrap_or(HWND::default()) };
-                    let sel_bind = unsafe { SendMessageW(cb_binding, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0 as i32 };
-                    settings.binding_direction = if sel_bind == 1 { "right".to_string() } else { "left".to_string() };
-
-                    let cb_res = unsafe { GetDlgItem(Some(hwnd), 104).ok().unwrap_or(HWND::default()) };
-                    let sel_res = unsafe { SendMessageW(cb_res, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0 as i32 };
-                    let modes = ["Nearest", "Linear", "Cubic", "Lanczos"];
-                    if sel_res >= 0 && sel_res < modes.len() as i32 {
-                        settings.resampling_mode_gpu = modes[sel_res as usize].to_string();
-                    }
-
-                    unsafe {
-                        settings.max_cache_size_mb = GetDlgItemInt(hwnd, 105, None, false) as u64;
-                        settings.cpu_max_prefetch_pages = GetDlgItemInt(hwnd, 106, None, false) as usize;
-                        settings.gpu_max_prefetch_pages = GetDlgItemInt(hwnd, 107, None, false) as usize;
-                        settings.show_status_bar_info = IsDlgButtonChecked(hwnd, 108) == BST_CHECKED.0 as u32;
-                        settings.parallel_decoding_workers = GetDlgItemInt(hwnd, 109, None, false) as usize;
-                        settings.use_cpu_color_conversion = IsDlgButtonChecked(hwnd, 110) == BST_CHECKED.0 as u32;
-
-                        let _ = EndDialog(hwnd, IDOK.0 as isize);
-                    }
-                    0
-                } else if id == IDCANCEL.0 as u16 {
-                    unsafe { let _ = EndDialog(hwnd, IDCANCEL.0 as isize); }
-                    0
-                } else {
-                    0
-                }
-            }
-            _ => 0,
-        }
-    }
-
-    let res = unsafe { DialogBoxIndirectParamW(None, t.data.as_ptr() as _, Some(parent), Some(dialog_proc), LPARAM(&mut temp_settings as *mut _ as isize)) };
-    
-    if res == IDOK.0 as isize {
-        let restart_needed = temp_settings.rendering_backend != settings.rendering_backend;
-        let color_conv_changed = temp_settings.use_cpu_color_conversion != settings.use_cpu_color_conversion;
-        
-        *settings = temp_settings;
-        let _ = settings.save("config.json");
-        
-        // メインスレッド側の状態更新
-        if color_conv_changed {
-            if let Ok(mut cache) = cpu_cache.lock() {
-                cache.clear();
-            }
-        }
-        
-        // リスタート判定
-        if restart_needed {
-            unsafe {
-                use windows::core::w;
-                let res = MessageBoxW(Some(parent), w!("レンダリングエンジンの変更には再起動が必要です。今すぐ再起動しますか？"), w!("再起動の確認"), MB_ICONQUESTION | MB_YESNO);
-                if res == IDYES {
-                    if let Ok(current_exe) = std::env::current_exe() {
-                        let _ = std::process::Command::new(current_exe).spawn();
-                    }
-                    elwt.exit();
-                }
-            }
-        }
-        
-        // 再描画をリクエスト
-        window.request_redraw();
-    }
-}
-
-fn loword(n: u32) -> u16 { (n & 0xFFFF) as u16 }
 
 fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &Runtime, cpu_cache: &SharedImageCache, settings: &Settings, path_key: &str) {
     let display_indices = app_state.get_page_indices_to_display();
