@@ -24,6 +24,8 @@ pub struct ModernSettingsWindow {
     pub mouse_pos: (f32, f32),
     pub is_clicking: bool,
     pub selected_tab: usize,
+    pub focus_index: usize,
+    pub is_focus_on_tabs: bool,
     pub event_proxy: winit::event_loop::EventLoopProxy<crate::image::loader::UserEvent>,
 }
 
@@ -131,6 +133,8 @@ impl ModernSettingsWindow {
                 mouse_pos: (0.0, 0.0),
                 is_clicking: false,
                 selected_tab: 0,
+                focus_index: 0,
+                is_focus_on_tabs: true,
                 event_proxy,
             })
         }
@@ -138,6 +142,56 @@ impl ModernSettingsWindow {
 
     pub fn handle_event(&mut self, event: &WindowEvent) -> bool {
         match event {
+            WindowEvent::KeyboardInput { event: req, .. } => {
+                if req.state == ElementState::Pressed {
+                    use winit::keyboard::{Key, NamedKey};
+                    match req.logical_key {
+                        Key::Named(NamedKey::ArrowLeft) => {
+                            if self.is_focus_on_tabs {
+                                self.selected_tab = (self.selected_tab + 2) % 3;
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowRight) => {
+                            if self.is_focus_on_tabs {
+                                self.selected_tab = (self.selected_tab + 1) % 3;
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if self.is_focus_on_tabs {
+                                self.is_focus_on_tabs = false;
+                                self.focus_index = 0;
+                            } else {
+                                let count = self.get_item_count();
+                                if count > 0 {
+                                    self.focus_index = (self.focus_index + 1) % count;
+                                }
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            if !self.is_focus_on_tabs {
+                                if self.focus_index == 0 {
+                                    self.is_focus_on_tabs = true;
+                                } else {
+                                    self.focus_index -= 1;
+                                }
+                            }
+                        }
+                        Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
+                            if !self.is_focus_on_tabs {
+                                self.handle_action_at(self.focus_index);
+                            }
+                        }
+                        Key::Named(NamedKey::Tab) => {
+                            self.is_focus_on_tabs = !self.is_focus_on_tabs;
+                            self.focus_index = 0;
+                        }
+                        Key::Named(NamedKey::Escape) => return true,
+                        _ => {}
+                    }
+                }
+                self.window.request_redraw();
+                false
+            }
             WindowEvent::CloseRequested => true,
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = (position.x as f32, position.y as f32);
@@ -177,31 +231,36 @@ impl ModernSettingsWindow {
 
         // 全般タブ内のクリック判定
         if self.selected_tab == 0 {
-            // 表示モードトグル (簡易的に上から順に判定)
-            let spread_rect = D2D_RECT_F {
-                left: 40.0,
-                top: 160.0,
-                right: 200.0,
-                bottom: 190.0,
-            };
-            if self.is_in_rect(spread_rect) {
-                let _ = self
-                    .event_proxy
-                    .send_event(crate::image::loader::UserEvent::ToggleSpreadView);
-                return;
+            let items = [160.0, 200.0, 240.0, 280.0];
+            for (idx, &top) in items.iter().enumerate() {
+                let rect = D2D_RECT_F {
+                    left: 40.0,
+                    top,
+                    right: 200.0,
+                    bottom: top + 30.0,
+                };
+                if self.is_in_rect(rect) {
+                    self.is_focus_on_tabs = false;
+                    self.focus_index = idx;
+                    self.handle_action_at(idx);
+                    return;
+                }
             }
-
-            let binding_rect = D2D_RECT_F {
-                left: 40.0,
-                top: 200.0,
-                right: 200.0,
-                bottom: 230.0,
-            };
-            if self.is_in_rect(binding_rect) {
-                let _ = self
-                    .event_proxy
-                    .send_event(crate::image::loader::UserEvent::ToggleBindingDirection);
-                return;
+        } else if self.selected_tab == 1 {
+            let items = [160.0, 200.0, 240.0, 280.0];
+            for (idx, &top) in items.iter().enumerate() {
+                let rect = D2D_RECT_F {
+                    left: 40.0,
+                    top,
+                    right: 200.0,
+                    bottom: top + 30.0,
+                };
+                if self.is_in_rect(rect) {
+                    self.is_focus_on_tabs = false;
+                    self.focus_index = idx;
+                    self.handle_action_at(idx);
+                    return;
+                }
             }
         }
     }
@@ -275,6 +334,7 @@ impl ModernSettingsWindow {
                 };
                 let is_hover = self.is_in_rect(rect);
                 let is_selected = self.selected_tab == i;
+                let is_focused = self.is_focus_on_tabs && is_selected;
 
                 let bg_color = if is_selected {
                     D2D1_COLOR_F {
@@ -300,6 +360,16 @@ impl ModernSettingsWindow {
                 };
                 self.brush.SetColor(&bg_color);
                 self.context.FillRectangle(&rect, &self.brush);
+
+                if is_focused {
+                    self.brush.SetColor(&D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    });
+                    self.context.DrawRectangle(&rect, &self.brush, 2.0, None);
+                }
 
                 self.brush.SetColor(&D2D1_COLOR_F {
                     r: 1.0,
@@ -354,15 +424,47 @@ impl ModernSettingsWindow {
 
     fn draw_general_tab(&self, settings: &Settings) {
         // ボタン描画
+        let focus_idx = if !self.is_focus_on_tabs {
+            Some(self.focus_index)
+        } else {
+            None
+        };
         self.draw_button(
             "表示モード切替",
             40.0,
             160.0,
             160.0,
-            190.0,
+            30.0,
             settings.is_spread_view,
+            focus_idx == Some(0),
         );
-        self.draw_button("綴じ方向切替", 40.0, 200.0, 160.0, 230.0, false);
+        self.draw_button(
+            "綴じ方向切替",
+            40.0,
+            200.0,
+            160.0,
+            30.0,
+            false,
+            focus_idx == Some(1),
+        );
+        self.draw_button(
+            "ステータスバー",
+            40.0,
+            240.0,
+            160.0,
+            30.0,
+            settings.show_status_bar_info,
+            focus_idx == Some(2),
+        );
+        self.draw_button(
+            "CPU色変換",
+            40.0,
+            280.0,
+            160.0,
+            30.0,
+            settings.use_cpu_color_conversion,
+            focus_idx == Some(3),
+        );
 
         let binding_text = if settings.binding_direction == "left" {
             "左綴じ (Left)"
@@ -376,13 +478,33 @@ impl ModernSettingsWindow {
         };
 
         let text = format!(
-            "■ 基本設定\n\n表示モード: {}\n綴じ方向: {}\n\n(※ 項目をクリックして変更できます)",
-            spread_text, binding_text
+            "■ 基本設定\n\n表示モード: {}\n綴じ方向: {}\nステータスバー: {}\nCPU色変換: {}\n\n(※ 項目をクリックして変更できます)",
+            spread_text,
+            binding_text,
+            if settings.show_status_bar_info {
+                "表示"
+            } else {
+                "非表示"
+            },
+            if settings.use_cpu_color_conversion {
+                "有効"
+            } else {
+                "無効"
+            }
         );
-        self.draw_debug_text(&text, 250.0);
+        self.draw_debug_text(&text, 330.0);
     }
 
-    fn draw_button(&self, label: &str, left: f32, top: f32, width: f32, height: f32, active: bool) {
+    fn draw_button(
+        &self,
+        label: &str,
+        left: f32,
+        top: f32,
+        width: f32,
+        height: f32,
+        active: bool,
+        focused: bool,
+    ) {
         unsafe {
             let rect = D2D_RECT_F {
                 left,
@@ -399,7 +521,7 @@ impl ModernSettingsWindow {
                     b: 0.85,
                     a: 1.0,
                 }
-            } else if is_hover {
+            } else if is_hover || focused {
                 D2D1_COLOR_F {
                     r: 0.3,
                     g: 0.32,
@@ -417,6 +539,16 @@ impl ModernSettingsWindow {
 
             self.brush.SetColor(&bg_color);
             self.context.FillRectangle(&rect, &self.brush);
+
+            if focused {
+                self.brush.SetColor(&D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                });
+                self.context.DrawRectangle(&rect, &self.brush, 1.5, None);
+            }
 
             self.brush.SetColor(&D2D1_COLOR_F {
                 r: 1.0,
@@ -442,6 +574,49 @@ impl ModernSettingsWindow {
     }
 
     fn draw_rendering_tab(&self, settings: &Settings) {
+        // ボタン描画
+        let focus_idx = if !self.is_focus_on_tabs {
+            Some(self.focus_index)
+        } else {
+            None
+        };
+        self.draw_button(
+            "見開き表示切替",
+            40.0,
+            160.0,
+            160.0,
+            30.0,
+            settings.is_spread_view,
+            focus_idx == Some(0),
+        );
+        self.draw_button(
+            "先頭単一表示",
+            40.0,
+            200.0,
+            160.0,
+            30.0,
+            settings.spread_view_first_page_single,
+            focus_idx == Some(1),
+        );
+        self.draw_button(
+            "CPUリサンプリング",
+            40.0,
+            240.0,
+            160.0,
+            30.0,
+            false,
+            focus_idx == Some(2),
+        );
+        self.draw_button(
+            "GPUリサンプリング",
+            40.0,
+            280.0,
+            160.0,
+            30.0,
+            false,
+            focus_idx == Some(3),
+        );
+
         let backend = match settings.rendering_backend.as_str() {
             "direct2d" => "Direct2D (推奨)",
             "d3d11" => "Direct3D 11",
@@ -450,15 +625,22 @@ impl ModernSettingsWindow {
         };
 
         let text = format!(
-            "■ レンダリング設定\n\nバックエンド: {}\n見開き表示: {}\n\n(※ 変更の反映にはアプリの再起動が必要です)",
+            "■ レンダリング設定\n\nバックエンド: {}\n見開き表示: {}\n先頭単一: {}\nCPUサンプリング: {}\nGPUサンプリング: {}\n\n(※ 項目をクリックして変更。バックエンド変更は再起動が必要)",
             backend,
             if settings.is_spread_view {
                 "有効"
             } else {
                 "無効"
-            }
+            },
+            if settings.spread_view_first_page_single {
+                "有効"
+            } else {
+                "無効"
+            },
+            settings.resampling_mode_cpu,
+            settings.resampling_mode_gl
         );
-        self.draw_debug_text(&text, 140.0);
+        self.draw_debug_text(&text, 330.0);
     }
 
     fn draw_about_tab(&self) {
@@ -493,6 +675,66 @@ impl ModernSettingsWindow {
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
+        }
+    }
+
+    fn get_item_count(&self) -> usize {
+        match self.selected_tab {
+            0 => 4, // 全般: 表示モード, 綴じ方向, ステータスバー, CPU色変換
+            1 => 4, // レンダリング: 見開き, 先頭単一, CPUサンプリング, GPUサンプリング
+            _ => 0,
+        }
+    }
+
+    fn handle_action_at(&self, index: usize) {
+        if self.selected_tab == 0 {
+            match index {
+                0 => {
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::ToggleSpreadView);
+                }
+                1 => {
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::ToggleBindingDirection);
+                }
+                2 => {
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::ToggleStatusBar);
+                }
+                3 => {
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::ToggleCpuColorConversion);
+                }
+                _ => {}
+            }
+        } else if self.selected_tab == 1 {
+            match index {
+                0 => {
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::ToggleSpreadView);
+                }
+                1 => {
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::ToggleFirstPageSingle);
+                }
+                2 => {
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::RotateResamplingCpu);
+                }
+                3 => {
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::RotateResamplingGpu);
+                }
+                _ => {}
+            }
         }
     }
 }

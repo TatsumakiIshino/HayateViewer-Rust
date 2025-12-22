@@ -30,6 +30,11 @@ pub enum UserEvent {
     PageLoaded(usize),
     ToggleSpreadView,
     ToggleBindingDirection,
+    ToggleFirstPageSingle,
+    ToggleCpuColorConversion,
+    RotateResamplingCpu,
+    RotateResamplingGpu,
+    ToggleStatusBar,
 }
 
 pub struct AsyncLoader {

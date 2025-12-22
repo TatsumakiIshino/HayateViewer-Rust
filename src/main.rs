@@ -920,6 +920,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     window.request_redraw();
                     if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
                 }
+                UserEvent::ToggleFirstPageSingle => {
+                    settings.spread_view_first_page_single = !settings.spread_view_first_page_single;
+                    let _ = settings.save("config.json");
+                    view_state.reset();
+                    window.request_redraw();
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                }
+                UserEvent::ToggleCpuColorConversion => {
+                    settings.use_cpu_color_conversion = !settings.use_cpu_color_conversion;
+                    let _ = settings.save("config.json");
+                    view_state.reset();
+                    request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                    window.request_redraw();
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                }
+                UserEvent::RotateResamplingCpu => {
+                    let modes = ["PIL_LANCZOS", "PIL_BILINEAR", "PIL_BICUBIC", "PIL_NEAREST"];
+                    let current = settings.resampling_mode_cpu.as_str();
+                    let idx = modes.iter().position(|&m| m == current).unwrap_or(0);
+                    settings.resampling_mode_cpu = modes[(idx + 1) % modes.len()].to_string();
+                    let _ = settings.save("config.json");
+                    view_state.reset();
+                    window.request_redraw();
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                }
+                UserEvent::RotateResamplingGpu => {
+                    let modes = ["GL_LANCZOS3", "GL_LINEAR", "DX_LANCZOS", "DX_LINEAR"];
+                    let current = settings.resampling_mode_gl.as_str(); // GL/DX 共用で簡易的に
+                    let idx = modes.iter().position(|&m| m == current).unwrap_or(0);
+                    let new_mode = modes[(idx + 1) % modes.len()];
+                    settings.resampling_mode_gl = new_mode.to_string();
+                    settings.resampling_mode_dx = new_mode.to_string();
+                    let _ = settings.save("config.json");
+                    view_state.reset();
+                    window.request_redraw();
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                }
+                UserEvent::ToggleStatusBar => {
+                    settings.show_status_bar_info = !settings.show_status_bar_info;
+                    let _ = settings.save("config.json");
+                    window.request_redraw();
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                }
             }
         }
             Event::AboutToWait => {
