@@ -1,6 +1,6 @@
 [package]
 name = "hayate-viewer-rust"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 
 [dependencies]
@@ -17,7 +17,6 @@ zip = { version = "0.6", default-features = false, features = ["deflate"] }
 walkdir = "2.5.0"
 natord = "1.0.9"
 sevenz-rust = "0.6.1"
-hayro-jpeg2000 = { path = "i:/hayro-fork/hayro-jpeg2000" }
 jpeg2k = "0.10.1"
 lru = "0.16.2"
 unrar = "0.5.4"
