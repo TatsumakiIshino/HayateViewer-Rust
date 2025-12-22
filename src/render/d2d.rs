@@ -97,17 +97,6 @@ impl Renderer for D2DRenderer {
         }
     }
 
-    fn fill_rounded_rectangle(&self, rect: &D2D_RECT_F, radius: f32, color: &D2D1_COLOR_F) {
-        unsafe {
-            self.brush.SetColor(color);
-            let rounded = D2D1_ROUNDED_RECT {
-                rect: *rect,
-                radiusX: radius,
-                radiusY: radius,
-            };
-            self.context.FillRoundedRectangle(&rounded, &self.brush);
-        }
-    }
 
     fn draw_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, stroke_width: f32) {
         unsafe {

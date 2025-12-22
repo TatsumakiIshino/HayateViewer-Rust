@@ -11,6 +11,7 @@ pub struct AppState {
     pub jump_input_buffer: String,
     pub show_seekbar: bool,
     pub is_dragging_seekbar: bool,
+    pub temp_settings: Option<crate::config::Settings>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,7 @@ impl AppState {
             jump_input_buffer: String::new(),
             show_seekbar: false,
             is_dragging_seekbar: false,
+            temp_settings: None,
         }
     }
 

@@ -14,7 +14,6 @@ use crate::image::cache::{create_shared_cache, SharedImageCache};
 use crate::image::loader::{AsyncLoader, LoaderRequest, UserEvent};
 use crate::state::{AppState, BindingDirection};
 use std::sync::Arc;
-use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F, D2D_SIZE_F};
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
@@ -28,6 +27,25 @@ use winit::{
 use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 use winit::platform::windows::WindowBuilderExtWindows;
 use tokio::runtime::Runtime;
+
+use windows::Win32::Foundation::{HWND, WPARAM, LPARAM};
+use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::Win32::UI::Controls::*;
+use crate::render::DialogTemplate;
+
+fn update_window_title(window: &winit::window::Window, _path_key: &str, app_state: &AppState) {
+    let current = app_state.current_page_index;
+    let total = app_state.image_files.len();
+    let binding = if app_state.binding_direction == BindingDirection::Right { " (右綴じ)" } else { " (左綴じ)" };
+    let spread = if app_state.is_spread_view { " [見開き]" } else { "" };
+    
+    let title = if total > 0 {
+        format!("HayateViewer - {} / {}{}{}", current + 1, total, binding, spread)
+    } else {
+        "HayateViewer".to_string()
+    };
+    window.set_title(&title);
+}
 
 struct ViewState {
     zoom_level: f32,
@@ -165,6 +183,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => Box::new(D2DRenderer::new(hwnd)?),
     };
+
+    println!("[情報] レンダリングエンジン: {}", settings.rendering_backend);
     let mut view_state = ViewState::new();
     let mut app_state = AppState::new();
     let mut current_path_key = String::new();
@@ -176,7 +196,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cache & Loader
     let max_bytes = (settings.max_cache_size_mb as usize) * 1024 * 1024;
     let cpu_cache = create_shared_cache(100, max_bytes);
-    let loader = AsyncLoader::new(cpu_cache.clone(), proxy);
+    let loader = AsyncLoader::new(cpu_cache.clone(), proxy.clone());
 
     {
 
@@ -213,8 +233,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut current_bitmaps: Vec<(usize, crate::render::TextureHandle)> = Vec::new();
     let mut modifiers = ModifiersState::default();
+    
+    let mut last_dialog_close = std::time::Instant::now();
 
-    event_loop.run(move |event: Event<UserEvent>, elwt| {
+    event_loop.run(move |event: Event<UserEvent>, elwt: &winit::event_loop::EventLoopWindowTarget<UserEvent>| {
         elwt.set_control_flow(ControlFlow::Wait);
         match event {
             Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
@@ -296,6 +318,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     match logical_key {
+                        Key::Character(ref s) if s.to_lowercase() == "o" => {
+                            if last_dialog_close.elapsed() < std::time::Duration::from_millis(500) {
+                                return;
+                            }
+                            // ネイティブダイアログを表示
+                            let proxy_clone = proxy.clone();
+                            show_settings_dialog(hwnd, &mut settings, &app_state, &proxy_clone, &window, &renderer, &rt, &cpu_cache, &current_path_key, elwt);
+                            last_dialog_close = std::time::Instant::now();
+                        }
                         Key::Character(ref s) if s.to_lowercase() == "s" => {
                             if modifiers.shift_key() {
                                 // Shift + S: ページジャンプを開く
@@ -306,106 +337,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // S: シークバー切り替え
                                 app_state.show_seekbar = !app_state.show_seekbar;
                             }
-                            window.request_redraw();
-                        }
-                        Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) => {
-                            if app_state.is_options_open {
-                                let total_options = 10;
-                                if logical_key == Key::Named(NamedKey::ArrowUp) {
-                                    app_state.options_selected_index = (app_state.options_selected_index + total_options - 1) % total_options;
-                                } else {
-                                    app_state.options_selected_index = (app_state.options_selected_index + 1) % total_options;
-                                }
-                            }
                         }
                         Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowLeft) => {
-                            if app_state.is_options_open {
-                                let direction = if logical_key == Key::Named(NamedKey::ArrowRight) { 1 } else { -1 };
-                                match app_state.options_selected_index {
-                                    0 => {
-                                        let engines = ["direct2d", "direct3d11", "opengl"];
-                                        let current_idx = engines.iter().position(|&e| e == settings.rendering_backend).unwrap_or(0);
-                                        let new_idx = (current_idx as isize + direction as isize).rem_euclid(engines.len() as isize) as usize;
-                                        settings.rendering_backend = engines[new_idx].to_string();
-                                        println!("[設定] レンダリングエンジンを {} に変更しました (再起動後に反映)", get_backend_display_name(&settings.rendering_backend));
-                                        let _ = settings.save("config.json");
-                                    }
-                                    1 => {
-                                        app_state.is_spread_view = !app_state.is_spread_view;
-                                        settings.is_spread_view = app_state.is_spread_view;
-                                        let _ = settings.save("config.json");
-                                    },
-                                    2 => app_state.binding_direction = if app_state.binding_direction == BindingDirection::Left { BindingDirection::Right } else { BindingDirection::Left },
-                                    3 => {
-                                        let modes = ["DX_NEAREST", "DX_LINEAR", "DX_CUBIC", "DX_HQC", "DX_LANCZOS"];
-                                        let current_idx = modes.iter().position(|&m| m == settings.resampling_mode_dx).unwrap_or(3);
-                                        let new_idx = (current_idx as isize + direction as isize).rem_euclid(modes.len() as isize) as usize;
-                                        
-                                        settings.resampling_mode_dx = modes[new_idx].to_string();
-                                        
-                                        // レンダラーに即時反映
-                                        let new_mode = match modes[new_idx] {
-                                            "DX_NEAREST" => InterpolationMode::NearestNeighbor,
-                                            "DX_LINEAR" => InterpolationMode::Linear,
-                                            "DX_CUBIC" => InterpolationMode::Cubic,
-                                            "DX_HQC" => InterpolationMode::HighQualityCubic,
-                                            "DX_LANCZOS" => InterpolationMode::Lanczos,
-                                            _ => InterpolationMode::HighQualityCubic,
-                                        };
-                                        renderer.set_interpolation_mode(new_mode);
-                                        let _ = settings.save("config.json");
-                                    }
-                                    4 => {
-                                        if direction > 0 { settings.max_cache_size_mb += 512; }
-                                        else { settings.max_cache_size_mb = settings.max_cache_size_mb.saturating_sub(512); }
-                                        let _ = settings.save("config.json");
-                                    }
-                                    5 => {
-                                        if direction > 0 { settings.cpu_max_prefetch_pages += 1; }
-                                        else { settings.cpu_max_prefetch_pages = settings.cpu_max_prefetch_pages.saturating_sub(1); }
-                                        let _ = settings.save("config.json");
-                                    }
-                                    6 => {
-                                        if direction > 0 { settings.gpu_max_prefetch_pages += 1; }
-                                        else { settings.gpu_max_prefetch_pages = settings.gpu_max_prefetch_pages.saturating_sub(1); }
-                                        let _ = settings.save("config.json");
-                                    }
-                                    7 => {
-                                        settings.show_status_bar_info = !settings.show_status_bar_info;
-                                        let _ = settings.save("config.json");
-                                    }
-                                    8 => {
-                                        // デコードスレッド数
-                                        if direction > 0 { settings.parallel_decoding_workers += 1; }
-                                        else { settings.parallel_decoding_workers = settings.parallel_decoding_workers.saturating_sub(1); }
-                                        let _ = settings.save("config.json");
-                                    }
-                                    9 => {
-                                        settings.use_cpu_color_conversion = !settings.use_cpu_color_conversion;
-                                        let _ = settings.save("config.json");
-                                        // 設定変更時はキャッシュをクリアして再読込
-                                        cpu_cache.lock().unwrap().clear();
-                                        current_bitmaps.clear();
-                                        request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
-                                    }
-                                    _ => (),
-                                }
+                            // ページ移動
+                            let direction = if logical_key == Key::Named(NamedKey::ArrowRight) { 1 } else { -1 };
+                            if modifiers.shift_key() {
+                                app_state.navigate(direction * 10);
+                            } else if modifiers.control_key() {
+                                let new_idx = (app_state.current_page_index as isize + direction as isize).clamp(0, (app_state.image_files.len() as isize - 1).max(0)) as usize;
+                                app_state.current_page_index = new_idx;
                             } else {
-                                // ページ移動
-                                let direction = if logical_key == Key::Named(NamedKey::ArrowRight) { 1 } else { -1 };
-                                if modifiers.shift_key() {
-                                    app_state.navigate(direction * 10);
-                                } else if modifiers.control_key() {
-                                    let new_idx = (app_state.current_page_index as isize + direction as isize).clamp(0, (app_state.image_files.len() as isize - 1).max(0)) as usize;
-                                    app_state.current_page_index = new_idx;
-                                } else {
-                                    app_state.navigate(direction);
-                                }
-                                view_state.reset();
-                                let l = loader.clone();
-                                rt.spawn(async move { let _ = l.send_request(LoaderRequest::ClearPrefetch).await; });
-                                request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                                app_state.navigate(direction);
                             }
+                            view_state.reset();
+                            let l = loader.clone();
+                            rt.spawn(async move { let _ = l.send_request(LoaderRequest::ClearPrefetch).await; });
+                            request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                         }
                         Key::Character(ref s) if s.to_lowercase() == "b" => {
                             if !app_state.is_options_open {
@@ -421,9 +368,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                             }
                         }
-                        Key::Character(ref s) if s.to_lowercase() == "o" => {
-                            app_state.is_options_open = !app_state.is_options_open;
-                            window.request_redraw();
+                        Key::Named(NamedKey::Escape) => {
+                            if app_state.is_jump_open {
+                                app_state.is_jump_open = false;
+                                app_state.jump_input_buffer.clear();
+                            }
                         }
                         Key::Character(ref s) if s == "[" || s == "]" => {
                             if !app_state.is_options_open && !app_state.is_jump_open {
@@ -437,8 +386,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             app_state.image_files = loader.get_file_names().to_vec();
                                         }
                                         app_state.current_page_index = 0;
-                                        // フォルダ移動時は一旦クリアしても良いが、
-                                        // シームレスな遷移を重視し ClearPrefetch に留める
                                         current_bitmaps.clear(); 
                                         current_path_key = new_path.clone();
                                         update_window_title(&window, &current_path_key, &app_state);
@@ -451,47 +398,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        Key::Named(NamedKey::Escape) => {
-                            if app_state.is_options_open {
-                                app_state.is_options_open = false;
-                                window.request_redraw();
-                            }
+                        Key::Character(ref s) if s == "+" || s == ";" => { // ";" は JP キーボードの "+"
+                            let window_size = window.inner_size();
+                            let win_size = (window_size.width as f32, window_size.height as f32);
+                            let center = (win_size.0 / 2.0, win_size.1 / 2.0);
+                            view_state.set_zoom(view_state.zoom_level * 1.15, center, win_size);
+                        }
+                        Key::Character(ref s) if s == "-" => {
+                            let window_size = window.inner_size();
+                            let win_size = (window_size.width as f32, window_size.height as f32);
+                            let center = (win_size.0 / 2.0, win_size.1 / 2.0);
+                            view_state.set_zoom(view_state.zoom_level / 1.15, center, win_size);
                         }
                         _ => {
-                            match logical_key {
-                                Key::Character(ref s) if s == "+" || s == ";" => { // ";" は JP キーボードの "+"
-                                    let window_size = window.inner_size();
-                                    let win_size = (window_size.width as f32, window_size.height as f32);
-                                    let center = (win_size.0 / 2.0, win_size.1 / 2.0);
-                                    view_state.set_zoom(view_state.zoom_level * 1.15, center, win_size);
-                                }
-                                Key::Character(ref s) if s == "-" => {
-                                    let window_size = window.inner_size();
-                                    let win_size = (window_size.width as f32, window_size.height as f32);
-                                    let center = (win_size.0 / 2.0, win_size.1 / 2.0);
-                                    view_state.set_zoom(view_state.zoom_level / 1.15, center, win_size);
-                                }
-                                _ => {
-                                    if let PhysicalKey::Code(code) = physical_key {
-                                        match code {
-                                            KeyCode::NumpadAdd => {
-                                                let window_size = window.inner_size();
-                                                let win_size = (window_size.width as f32, window_size.height as f32);
-                                                let center = (win_size.0 / 2.0, win_size.1 / 2.0);
-                                                view_state.set_zoom(view_state.zoom_level * 1.15, center, win_size);
-                                            }
-                                            KeyCode::NumpadSubtract => {
-                                                let window_size = window.inner_size();
-                                                let win_size = (window_size.width as f32, window_size.height as f32);
-                                                let center = (win_size.0 / 2.0, win_size.1 / 2.0);
-                                                view_state.set_zoom(view_state.zoom_level / 1.15, center, win_size);
-                                            }
-                                            KeyCode::NumpadMultiply => {
-                                                view_state.reset();
-                                            }
-                                            _ => (),
-                                        }
+                            if let PhysicalKey::Code(code) = physical_key {
+                                match code {
+                                    KeyCode::NumpadAdd => {
+                                        let window_size = window.inner_size();
+                                        let win_size = (window_size.width as f32, window_size.height as f32);
+                                        let center = (win_size.0 / 2.0, win_size.1 / 2.0);
+                                        view_state.set_zoom(view_state.zoom_level * 1.15, center, win_size);
                                     }
+                                    KeyCode::NumpadSubtract => {
+                                        let window_size = window.inner_size();
+                                        let win_size = (window_size.width as f32, window_size.height as f32);
+                                        let center = (win_size.0 / 2.0, win_size.1 / 2.0);
+                                        view_state.set_zoom(view_state.zoom_level / 1.15, center, win_size);
+                                    }
+                                    KeyCode::NumpadMultiply => {
+                                        view_state.reset();
+                                    }
+                                    _ => (),
                                 }
                             }
                         }
@@ -665,9 +602,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             // 残った candidates は解放対象
-                            for (idx, _) in candidates {
-                                println!("[GPUキャッシュ] VRAMを解放しました (距離または枚数超過): ページ {}", idx);
-                            }
+                            // current_bitmaps = to_keep; // 既存コード
                             current_bitmaps = to_keep;
                         }
 
@@ -748,7 +683,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let base_y = (win_h - draw_max_h) / 2.0 + view_state.pan_offset.1;
 
                                 let mut current_x = base_x;
-                                for (idx, info) in images_info {
+                                for (_idx, info) in images_info {
                                     // 見開きの場合、個々の画像幅を計算
                                     let w_step = if indices.len() == 2 {
                                         total_content_w / 2.0 * total_scale
@@ -773,20 +708,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         };
                                         renderer.draw_image(bmp, &dest_rect);
                                     } else {
-                                        // ロード中表示
-                                        let text = format!("Loading Page {}...", idx + 1);
-                                        let text_rect = D2D_RECT_F {
-                                            left: current_x,
-                                            top: y_center - 20.0,
-                                            right: current_x + w_step,
-                                            bottom: y_center + 20.0,
-                                        };
-                                        renderer.draw_text(
-                                            &text,
-                                            &text_rect,
-                                            &D2D1_COLOR_F { r: 0.6, g: 0.6, b: 0.6, a: 1.0 },
-                                            false
-                                        );
+                                        // 未ロード時は何も描画しない
                                     }
                                     current_x += w_step;
                                 }
@@ -852,7 +774,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         
                         // メインパネル
-                        renderer.fill_rounded_rectangle(&jump_rect, 12.0, &D2D1_COLOR_F { r: 0.05, g: 0.05, b: 0.05, a: 0.95 });
+                        renderer.fill_rectangle(&jump_rect, &D2D1_COLOR_F { r: 0.05, g: 0.05, b: 0.05, a: 0.95 });
                         renderer.draw_rectangle(&jump_rect, &D2D1_COLOR_F { r: 0.3, g: 0.3, b: 0.3, a: 1.0 }, 1.0);
 
                         renderer.set_text_alignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -872,7 +794,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             right: (win_w + input_bg_w) / 2.0,
                             bottom: jump_rect.top + 55.0 + input_bg_h,
                         };
-                        renderer.fill_rounded_rectangle(&input_bg_rect, 6.0, &D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.6 });
+                        renderer.fill_rectangle(&input_bg_rect, &D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.6 });
 
                         // 入力中の文字と合計を一つの文字列として中央揃えで描画
                         let input_val = if app_state.jump_input_buffer.is_empty() { "---" } else { &app_state.jump_input_buffer };
@@ -924,79 +846,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             D2D1_COLOR_F { r: 0.0, g: 0.4, b: 0.8, a: 0.9 }
                         };
-                        renderer.fill_rounded_rectangle(&progress_rect, 4.0, &bar_color);
+                        renderer.fill_rectangle(&progress_rect, &bar_color);
                     }
 
-                    // 設定オーバーレイの描画
+                    // 設定オーバーレイ（廃止）
                     if app_state.is_options_open {
-                        let overlay_w = 400.0;
-                        let overlay_h = 450.0;
-                        let overlay_rect = D2D_RECT_F {
-                            left: (win_w - overlay_w) / 2.0,
-                            top: (win_h - overlay_h) / 2.0,
-                            right: (win_w + overlay_w) / 2.0,
-                            bottom: (win_h + overlay_h) / 2.0,
-                        };
-
-                        // 背景（半透明の黒）
-                        renderer.fill_rectangle(&overlay_rect, &D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.8 });
-                        
-                        let mut text_rect = D2D_RECT_F {
-                            left: overlay_rect.left + 20.0,
-                            top: overlay_rect.top + 20.0,
-                            right: overlay_rect.right - 20.0,
-                            bottom: overlay_rect.top + 50.0,
-                        };
-
-                        renderer.draw_text("--- 設定 ---", &text_rect, &D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, false);
-                        text_rect.top += 40.0;
-                        text_rect.bottom += 40.0;
-
-                        let options = [
-                            ("レンダリングエンジン", get_backend_display_name(&settings.rendering_backend)),
-                            ("見開き表示", if app_state.is_spread_view { "オン" } else { "オフ" }),
-                            ("綴じ方向", if app_state.binding_direction == BindingDirection::Right { "右綴じ" } else { "左綴じ" }),
-                            ("補間モード (DX)", get_interpolation_display_name(&settings.resampling_mode_dx)),
-                            ("最大キャッシュ容量", &format!("{} MB", settings.max_cache_size_mb)),
-                            ("CPU 先読み数", &format!("{} ページ", settings.cpu_max_prefetch_pages)),
-                            ("GPU 先読み数", &format!("{} ページ", settings.gpu_max_prefetch_pages)),
-                            ("ステータスバー", if settings.show_status_bar_info { "表示" } else { "非表示" }),
-                            ("デコードスレッド数", &format!("{} (要再起動)", settings.parallel_decoding_workers)),
-                            ("CPU 色空間変換", if settings.use_cpu_color_conversion { "オン" } else { "オフ" }),
-                        ];
-
-                        for (i, (label, value)) in options.iter().enumerate() {
-                            let is_selected = i == app_state.options_selected_index;
-                            let color = if is_selected {
-                                D2D1_COLOR_F { r: 0.2, g: 0.6, b: 1.0, a: 1.0 }
-                            } else {
-                                D2D1_COLOR_F { r: 0.8, g: 0.8, b: 0.8, a: 1.0 }
-                            };
-
-                            if is_selected {
-                                let sel_rect = D2D_RECT_F {
-                                    left: overlay_rect.left + 10.0,
-                                    top: text_rect.top - 2.0,
-                                    right: overlay_rect.right - 10.0,
-                                    bottom: text_rect.bottom + 2.0,
-                                };
-                                renderer.fill_rectangle(&sel_rect, &D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.2 });
-                            }
-
-                            let display_text = format!("{}: {}", label, value);
-                            renderer.draw_text(&display_text, &text_rect, &color, false);
-                            
-                            text_rect.top += 35.0;
-                            text_rect.bottom += 35.0;
-                        }
-
-                        let hint_rect = D2D_RECT_F {
-                            left: overlay_rect.left + 20.0,
-                            top: overlay_rect.bottom - 40.0,
-                            right: overlay_rect.right - 20.0,
-                            bottom: overlay_rect.bottom - 10.0,
-                        };
-                        renderer.draw_text("矢印キーで変更、'O'キーで閉じる", &hint_rect, &D2D1_COLOR_F { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }, false);
+                        // 描画は行わず、ダイアログ表示フラグの管理のみ
                     }
 
                     let _ = renderer.end_draw();
@@ -1065,37 +920,229 @@ fn init_opengl(window: &Arc<winit::window::Window>) -> Result<crate::render::ope
     crate::render::opengl::OpenGLRenderer::new(Arc::new(gl), gl_context, gl_surface)
 }
 
-fn update_window_title(window: &winit::window::Window, path_key: &str, app_state: &AppState) {
-    if path_key.is_empty() {
-        window.set_title(&format!("HayateViewer Rust v{}", VERSION));
-        return;
-    }
+fn show_settings_dialog(
+    parent: HWND,
+    settings: &mut Settings,
+    _app_state: &AppState,
+    _proxy: &winit::event_loop::EventLoopProxy<UserEvent>,
+    window: &winit::window::Window,
+    _renderer: &Box<dyn Renderer>,
+    _rt: &Runtime,
+    cpu_cache: &SharedImageCache,
+    _current_path_key: &str,
+    elwt: &winit::event_loop::EventLoopWindowTarget<UserEvent>
+) {
+    println!("DEBUG: show_settings_dialog called");
+    let mut temp_settings = settings.clone();
+    // ダイアログテンプレートの構築
+    let style = 0x0080 | WS_POPUP.0 | WS_CAPTION.0 | WS_SYSMENU.0; // 0x40 (DS_SETFONT) removed to fix crash
+    let mut t = DialogTemplate::new("設定 - HayateViewer", 0, 0, 240, 310, style as u32);
+    
+    // ダイアログ項目のID定義
+    const ID_BACKEND: u16 = 101;
+    const ID_SPREAD: u16 = 102;
+    const ID_BINDING: u16 = 103;
+    const ID_RESAMPLING: u16 = 104;
+    const ID_CACHE_SIZE: u16 = 105;
+    const ID_CPU_PREFETCH: u16 = 106;
+    const ID_GPU_PREFETCH: u16 = 107;
+    const ID_STATUS_BAR: u16 = 108;
+    const ID_THREADS: u16 = 109;
+    const ID_COLOR_CONV: u16 = 110;
+    
+    let mut y = 10;
+    let label_x = 10;
+    let ctrl_x = 110;
+    let row_h = 22;
 
-    let base_name = std::path::Path::new(path_key)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| path_key.to_string());
+    let s_left = WS_VISIBLE.0 as u32 | 0 | WS_CHILD.0 as u32; // 0 == SS_LEFT
+    let s_combo = WS_VISIBLE.0 as u32 | 0x0003 | WS_VSCROLL.0 as u32 | WS_TABSTOP.0 as u32 | WS_CHILD.0 as u32; // 0x0003 == CBS_DROPDOWNLIST
+    let s_check = WS_VISIBLE.0 as u32 | 0x0003 | WS_TABSTOP.0 as u32 | WS_CHILD.0 as u32; // 0x0003 == BS_AUTOCHECKBOX
+    let s_edit = WS_VISIBLE.0 as u32 | 0 | 0x0080 | 0x2000 | WS_BORDER.0 as u32 | WS_TABSTOP.0 as u32 | WS_CHILD.0 as u32; // 0 == ES_LEFT, 0x0080 == ES_AUTOHSCROLL, 0x2000 == ES_NUMBER
+    let s_ok = WS_VISIBLE.0 as u32 | 0x0001 | WS_TABSTOP.0 as u32 | WS_CHILD.0 as u32; // 0x0001 == BS_DEFPUSHBUTTON
+    let s_cancel = WS_VISIBLE.0 as u32 | 0 | WS_TABSTOP.0 as u32 | WS_CHILD.0 as u32; // 0 == BS_PUSHBUTTON
 
-    let indices = app_state.get_page_indices_to_display();
-    let mut names = Vec::new();
-    for &idx in &indices {
-        if idx < app_state.image_files.len() {
-            let name = std::path::Path::new(&app_state.image_files[idx])
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| format!("Page {}", idx + 1));
-            if !name.is_empty() {
-                names.push(name);
+    t.add_item(0x0082, "レンダリング:", 1001, label_x, y, 90, 12, s_left);
+    t.add_item(0x0085, "", ID_BACKEND, ctrl_x, y - 2, 120, 100, s_combo);
+    y += row_h;
+
+    t.add_item(0x0080, "見開き表示", ID_SPREAD, label_x, y, 90, 12, s_check);
+    y += row_h;
+
+    t.add_item(0x0085, "綴じ方向:", 1002, label_x, y, 90, 12, s_left);
+    t.add_item(0x0085, "", ID_BINDING, ctrl_x, y - 2, 120, 60, s_combo);
+    y += row_h;
+
+    t.add_item(0x0082, "補間モード:", 1003, label_x, y, 90, 12, s_left);
+    t.add_item(0x0085, "", ID_RESAMPLING, ctrl_x, y - 2, 120, 100, s_combo);
+    y += row_h;
+
+    t.add_item(0x0082, "キャッシュ (MB):", 1004, label_x, y, 90, 12, s_left);
+    t.add_item(0x0081, "", ID_CACHE_SIZE, ctrl_x, y - 2, 120, 12, s_edit);
+    y += row_h;
+
+    t.add_item(0x0082, "CPU先読み (枚):", 1005, label_x, y, 90, 12, s_left);
+    t.add_item(0x0081, "", ID_CPU_PREFETCH, ctrl_x, y - 2, 120, 12, s_edit);
+    y += row_h;
+
+    t.add_item(0x0082, "GPU先読み (枚):", 1006, label_x, y, 90, 12, s_left);
+    t.add_item(0x0081, "", ID_GPU_PREFETCH, ctrl_x, y - 2, 120, 12, s_edit);
+    y += row_h;
+
+    t.add_item(0x0080, "ステータスバー表示", ID_STATUS_BAR, label_x, y, 120, 12, s_check);
+    y += row_h;
+
+    t.add_item(0x0082, "デコードスレッド:", 1007, label_x, y, 90, 12, s_left);
+    t.add_item(0x0081, "", ID_THREADS, ctrl_x, y - 2, 120, 12, s_edit);
+    y += row_h;
+
+    t.add_item(0x0080, "CPU 色変換を強制", ID_COLOR_CONV, label_x, y, 120, 12, s_check);
+    y += 30;
+
+    t.add_item(0x0080, "OK", IDOK.0 as u16, 60, y, 50, 14, s_ok);
+    t.add_item(0x0080, "キャンセル", IDCANCEL.0 as u16, 130, y, 50, 14, s_cancel);
+
+    unsafe extern "system" fn dialog_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> isize {
+        match msg {
+            WM_INITDIALOG => {
+                println!("DEBUG: dialog_proc WM_INITDIALOG");
+                let settings = unsafe { &*(lparam.0 as *const Settings) };
+                unsafe { let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, lparam.0); }
+
+                // コンボボックス等の初期化
+                let cb_backend = unsafe { GetDlgItem(Some(hwnd), 101).ok().unwrap_or(HWND::default()) };
+                for name in &["direct2d", "direct3d11", "opengl"] {
+                    let display = match *name {
+                        "direct2d" => "Direct2D",
+                        "direct3d11" => "Direct3D 11",
+                        "opengl" => "OpenGL",
+                        _ => *name,
+                    };
+                    let wide_name: Vec<u16> = display.encode_utf16().chain(Some(0)).collect();
+                    let idx = unsafe { SendMessageW(cb_backend, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide_name.as_ptr() as _))).0 as i32 };
+                    if *name == settings.rendering_backend {
+                        unsafe { let _ = SendMessageW(cb_backend, CB_SETCURSEL, Some(WPARAM(idx as usize)), Some(LPARAM(0))); }
+                    }
+                }
+
+                unsafe { CheckDlgButton(hwnd, 102, if settings.is_spread_view { BST_CHECKED } else { BST_UNCHECKED }); }
+                
+                let cb_binding = unsafe { GetDlgItem(Some(hwnd), 103).ok().unwrap_or(HWND::default()) };
+                for (i, name) in ["左綴じ / 左開き", "右綴じ / 右開き"].iter().enumerate() {
+                    let wide_name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+                    unsafe { let _ = SendMessageW(cb_binding, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide_name.as_ptr() as _))); }
+                    if (i == 0 && settings.binding_direction == "left") || (i == 1 && settings.binding_direction == "right") {
+                        unsafe { let _ = SendMessageW(cb_binding, CB_SETCURSEL, Some(WPARAM(i)), Some(LPARAM(0))); }
+                    }
+                }
+
+                let cb_res = unsafe { GetDlgItem(Some(hwnd), 104).ok().unwrap_or(HWND::default()) };
+                let modes = ["DX_NEAREST", "DX_LINEAR", "DX_CUBIC", "DX_HQC", "DX_LANCZOS"];
+                let mode_names = ["ニアレストネイバー", "バイリニア", "バイキュービック", "高品質バイキュービック", "Lanczos"];
+                for (i, name) in mode_names.iter().enumerate() {
+                    let wide_name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+                    unsafe { let _ = SendMessageW(cb_res, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide_name.as_ptr() as _))); }
+                    if modes[i] == settings.resampling_mode_dx {
+                        unsafe { let _ = SendMessageW(cb_res, CB_SETCURSEL, Some(WPARAM(i)), Some(LPARAM(0))); }
+                    }
+                }
+
+                unsafe {
+                    let _ = SetDlgItemInt(hwnd, 105, settings.max_cache_size_mb as u32, false);
+                    let _ = SetDlgItemInt(hwnd, 106, settings.cpu_max_prefetch_pages as u32, false);
+                    let _ = SetDlgItemInt(hwnd, 107, settings.gpu_max_prefetch_pages as u32, false);
+                    CheckDlgButton(hwnd, 108, if settings.show_status_bar_info { BST_CHECKED } else { BST_UNCHECKED });
+                    let _ = SetDlgItemInt(hwnd, 109, settings.parallel_decoding_workers as u32, false);
+                    CheckDlgButton(hwnd, 110, if settings.use_cpu_color_conversion { BST_CHECKED } else { BST_UNCHECKED });
+                }
+
+                1
             }
+            WM_COMMAND => {
+                let id = loword(wparam.0 as u32);
+                if id == IDOK.0 as u16 {
+                    let settings = unsafe { &mut *(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Settings) };
+                    
+                    let cb_backend = unsafe { GetDlgItem(Some(hwnd), 101).ok().unwrap_or(HWND::default()) };
+                    let sel = unsafe { SendMessageW(cb_backend, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0 as i32 };
+                    settings.rendering_backend = match sel {
+                        0 => "direct2d".to_string(),
+                        1 => "direct3d11".to_string(),
+                        2 => "opengl".to_string(),
+                        _ => settings.rendering_backend.clone(),
+                    };
+
+                    settings.is_spread_view = unsafe { IsDlgButtonChecked(hwnd, 102) == BST_CHECKED.0 as u32 };
+                    
+                    let cb_binding = unsafe { GetDlgItem(Some(hwnd), 103).ok().unwrap_or(HWND::default()) };
+                    let sel_bind = unsafe { SendMessageW(cb_binding, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0 as i32 };
+                    settings.binding_direction = if sel_bind == 1 { "right".to_string() } else { "left".to_string() };
+
+                    let cb_res = unsafe { GetDlgItem(Some(hwnd), 104).ok().unwrap_or(HWND::default()) };
+                    let sel_res = unsafe { SendMessageW(cb_res, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0 as i32 };
+                    let modes = ["DX_NEAREST", "DX_LINEAR", "DX_CUBIC", "DX_HQC", "DX_LANCZOS"];
+                    if sel_res >= 0 && sel_res < modes.len() as i32 {
+                        settings.resampling_mode_dx = modes[sel_res as usize].to_string();
+                    }
+
+                    unsafe {
+                        settings.max_cache_size_mb = GetDlgItemInt(hwnd, 105, None, false) as u64;
+                        settings.cpu_max_prefetch_pages = GetDlgItemInt(hwnd, 106, None, false) as usize;
+                        settings.gpu_max_prefetch_pages = GetDlgItemInt(hwnd, 107, None, false) as usize;
+                        settings.show_status_bar_info = IsDlgButtonChecked(hwnd, 108) == BST_CHECKED.0 as u32;
+                        settings.parallel_decoding_workers = GetDlgItemInt(hwnd, 109, None, false) as usize;
+                        settings.use_cpu_color_conversion = IsDlgButtonChecked(hwnd, 110) == BST_CHECKED.0 as u32;
+
+                        let _ = EndDialog(hwnd, IDOK.0 as isize);
+                    }
+                    0
+                } else if id == IDCANCEL.0 as u16 {
+                    unsafe { let _ = EndDialog(hwnd, IDCANCEL.0 as isize); }
+                    0
+                } else {
+                    0
+                }
+            }
+            _ => 0,
         }
     }
 
-    if names.is_empty() {
-        window.set_title(&format!("{} - HayateViewer Rust v{}", base_name, VERSION));
-    } else {
-        window.set_title(&format!("{} - {} - HayateViewer Rust v{}", base_name, names.join(" / "), VERSION));
+    let res = unsafe { DialogBoxIndirectParamW(None, t.data.as_ptr() as _, Some(parent), Some(dialog_proc), LPARAM(&mut temp_settings as *mut _ as isize)) };
+    
+    if res == IDOK.0 as isize {
+        let restart_needed = temp_settings.rendering_backend != settings.rendering_backend;
+        let color_conv_changed = temp_settings.use_cpu_color_conversion != settings.use_cpu_color_conversion;
+        
+        *settings = temp_settings;
+        let _ = settings.save("config.json");
+        
+        // メインスレッド側の状態更新
+        if color_conv_changed {
+            if let Ok(mut cache) = cpu_cache.lock() {
+                cache.clear();
+            }
+        }
+        
+        // リスタート判定
+        if restart_needed {
+            unsafe {
+                use windows::core::w;
+                let res = MessageBoxW(Some(parent), w!("レンダリングエンジンの変更には再起動が必要です。今すぐ再起動しますか？"), w!("再起動の確認"), MB_ICONQUESTION | MB_YESNO);
+                if res == IDYES {
+                    if let Ok(current_exe) = std::env::current_exe() {
+                        let _ = std::process::Command::new(current_exe).spawn();
+                    }
+                    elwt.exit();
+                }
+            }
+        }
+        
+        // 再描画をリクエスト
+        window.request_redraw();
     }
 }
+
+fn loword(n: u32) -> u16 { (n & 0xFFFF) as u16 }
 
 fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &Runtime, cpu_cache: &SharedImageCache, settings: &Settings, path_key: &str) {
     let display_indices = app_state.get_page_indices_to_display();
@@ -1110,7 +1157,7 @@ fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &
         let key = format!("{}::{}", path_key, idx);
         let cached = cpu_cache.lock().unwrap().get(&key).is_some();
         if !cached {
-            println!("[先読み] インデックス {} の即時読み込みをリクエスト", idx);
+            // println!("[先読み] インデックス {} の即時読み込みをリクエスト", idx);
             let l = loader_tx.clone();
             let cpu_conv = settings.use_cpu_color_conversion;
             rt.spawn(async move {
@@ -1139,9 +1186,9 @@ fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &
     let current = app_state.current_page_index as isize;
     targets_vec.sort_by_key(|&idx| (idx as isize - current).abs());
     
-    if !targets_vec.is_empty() {
-        println!("[先読み] 補充対象インデックス: {:?}", targets_vec);
-    }
+    // if !targets_vec.is_empty() {
+    //     println!("[先読み] 補充対象インデックス: {:?}", targets_vec);
+    // }
 
     for idx in targets_vec {
         let key = format!("{}::{}", path_key, idx);
@@ -1166,17 +1213,6 @@ fn get_backend_display_name(backend: &str) -> &str {
         "direct3d11" => "Direct3D 11",
         "opengl" => "OpenGL",
         _ => backend,
-    }
-}
-
-fn get_interpolation_display_name(mode: &str) -> &str {
-    match mode {
-        "DX_NEAREST" => "ニアレストネイバー (高速)",
-        "DX_LINEAR" => "バイリニア",
-        "DX_CUBIC" => "バイキュービック",
-        "DX_HQC" => "高品質バイキュービック",
-        "DX_LANCZOS" => "Lanczos (高品質)",
-        _ => mode,
     }
 }
 

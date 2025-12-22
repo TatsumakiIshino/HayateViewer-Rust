@@ -25,7 +25,7 @@ pub struct D3D11Renderer {
     // D3D11 Resources
     vertex_shader: ID3D11VertexShader,
     input_layout: ID3D11InputLayout,
-    pixel_shader_rgba: ID3D11PixelShader,
+    _pixel_shader_rgba: ID3D11PixelShader,
     pixel_shader_ycbcr: ID3D11PixelShader,
     vertex_buffer: ID3D11Buffer,
     constant_buffer: ID3D11Buffer,
@@ -130,7 +130,6 @@ impl Renderer for D3D11Renderer {
                 }
                 
                 let y_srv = self.create_r32_texture(image.width, image.height, &planes[0])?;
-                
                 let (dx, dy) = *subsampling;
                 let c_width = (image.width + dx as u32 - 1) / dx as u32;
                 let c_height = (image.height + dy as u32 - 1) / dy as u32;
@@ -144,8 +143,8 @@ impl Renderer for D3D11Renderer {
                     cr: cr_srv,
                     width: image.width,
                     height: image.height,
-                    subsampling: *subsampling,
-                    precision: *precision,
+                    _subsampling: *subsampling,
+                    _precision: *precision,
                     y_is_signed: *y_is_signed,
                     c_is_signed: *c_is_signed,
                 })
@@ -167,7 +166,7 @@ impl Renderer for D3D11Renderer {
                     );
                 }
             },
-            TextureHandle::D3D11YCbCr { y, cb, cr, width: _, height: _, subsampling: _, precision, y_is_signed, c_is_signed } => {
+            TextureHandle::D3D11YCbCr { y, cb, cr, width: _, height: _, _subsampling: _, _precision: precision, y_is_signed, c_is_signed } => {
                 unsafe {
                     // D2D の描画コンテキストを一時的に閉じる
                     self.d2d_context.EndDraw(None, None).unwrap();
@@ -278,17 +277,6 @@ impl Renderer for D3D11Renderer {
         }
     }
 
-    fn fill_rounded_rectangle(&self, rect: &D2D_RECT_F, radius: f32, color: &D2D1_COLOR_F) {
-        unsafe {
-            self.brush.SetColor(color);
-            let rounded = D2D1_ROUNDED_RECT {
-                rect: *rect,
-                radiusX: radius,
-                radiusY: radius,
-            };
-            self.d2d_context.FillRoundedRectangle(&rounded, &self.brush);
-        }
-    }
 
     fn draw_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, stroke_width: f32) {
         unsafe {
@@ -556,7 +544,7 @@ impl D3D11Renderer {
                 
                 vertex_shader,
                 input_layout,
-                pixel_shader_rgba,
+                _pixel_shader_rgba: pixel_shader_rgba,
                 pixel_shader_ycbcr,
                 vertex_buffer,
                 constant_buffer,
