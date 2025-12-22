@@ -185,6 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "DX_LINEAR" => InterpolationMode::Linear,
             "DX_CUBIC" => InterpolationMode::Cubic,
             "DX_HQC" => InterpolationMode::HighQualityCubic,
+            "DX_LANCZOS" => InterpolationMode::Lanczos,
             _ => InterpolationMode::HighQualityCubic,
         };
         renderer.set_interpolation_mode(mode);
@@ -326,7 +327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let current_idx = engines.iter().position(|&e| e == settings.rendering_backend).unwrap_or(0);
                                         let new_idx = (current_idx as isize + direction as isize).rem_euclid(engines.len() as isize) as usize;
                                         settings.rendering_backend = engines[new_idx].to_string();
-                                        println!("[設定] レンダリングエンジンを {} に変更しました (再起動後に反映)", settings.rendering_backend);
+                                        println!("[設定] レンダリングエンジンを {} に変更しました (再起動後に反映)", get_backend_display_name(&settings.rendering_backend));
                                         let _ = settings.save("config.json");
                                     }
                                     1 => {
@@ -336,7 +337,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     },
                                     2 => app_state.binding_direction = if app_state.binding_direction == BindingDirection::Left { BindingDirection::Right } else { BindingDirection::Left },
                                     3 => {
-                                        let modes = ["DX_NEAREST", "DX_LINEAR", "DX_CUBIC", "DX_HQC"];
+                                        let modes = ["DX_NEAREST", "DX_LINEAR", "DX_CUBIC", "DX_HQC", "DX_LANCZOS"];
                                         let current_idx = modes.iter().position(|&m| m == settings.resampling_mode_dx).unwrap_or(3);
                                         let new_idx = (current_idx as isize + direction as isize).rem_euclid(modes.len() as isize) as usize;
                                         
@@ -347,6 +348,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             "DX_NEAREST" => InterpolationMode::NearestNeighbor,
                                             "DX_LINEAR" => InterpolationMode::Linear,
                                             "DX_CUBIC" => InterpolationMode::Cubic,
+                                            "DX_HQC" => InterpolationMode::HighQualityCubic,
+                                            "DX_LANCZOS" => InterpolationMode::Lanczos,
                                             _ => InterpolationMode::HighQualityCubic,
                                         };
                                         renderer.set_interpolation_mode(new_mode);
@@ -824,7 +827,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         " Page: {} / {} | Backend: {} | CPU: {}p {} | GPU: {}p {} | Key: {}",
                         current_page_str,
                         total_pages,
-                        settings.rendering_backend,
+                        get_backend_display_name(&settings.rendering_backend),
                         cpu_indices.len(),
                         format_page_list(&cpu_indices, app_state.current_page_index),
                         gpu_indices.len(),
@@ -950,10 +953,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         text_rect.bottom += 40.0;
 
                         let options = [
-                            ("レンダリングエンジン", settings.rendering_backend.as_str()),
+                            ("レンダリングエンジン", get_backend_display_name(&settings.rendering_backend)),
                             ("見開き表示", if app_state.is_spread_view { "オン" } else { "オフ" }),
                             ("綴じ方向", if app_state.binding_direction == BindingDirection::Right { "右綴じ" } else { "左綴じ" }),
-                            ("補間モード (DX)", settings.resampling_mode_dx.as_str()),
+                            ("補間モード (DX)", get_interpolation_display_name(&settings.resampling_mode_dx)),
                             ("最大キャッシュ容量", &format!("{} MB", settings.max_cache_size_mb)),
                             ("CPU 先読み数", &format!("{} ページ", settings.cpu_max_prefetch_pages)),
                             ("GPU 先読み数", &format!("{} ページ", settings.gpu_max_prefetch_pages)),
@@ -1154,6 +1157,26 @@ fn request_pages_with_prefetch(app_state: &AppState, loader: &AsyncLoader, rt: &
                 let _ = l.send(LoaderRequest::Load { index: idx, priority: 1, use_cpu_color_conversion: cpu_conv }).await;
             });
         }
+    }
+}
+
+fn get_backend_display_name(backend: &str) -> &str {
+    match backend {
+        "direct2d" => "Direct2D",
+        "direct3d11" => "Direct3D 11",
+        "opengl" => "OpenGL",
+        _ => backend,
+    }
+}
+
+fn get_interpolation_display_name(mode: &str) -> &str {
+    match mode {
+        "DX_NEAREST" => "ニアレストネイバー (高速)",
+        "DX_LINEAR" => "バイリニア",
+        "DX_CUBIC" => "バイキュービック",
+        "DX_HQC" => "高品質バイキュービック",
+        "DX_LANCZOS" => "Lanczos (高品質)",
+        _ => mode,
     }
 }
 

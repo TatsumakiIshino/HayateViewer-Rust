@@ -319,6 +319,7 @@ impl Renderer for D3D11Renderer {
             InterpolationMode::Linear => D2D1_INTERPOLATION_MODE_LINEAR,
             InterpolationMode::Cubic => D2D1_INTERPOLATION_MODE_CUBIC,
             InterpolationMode::HighQualityCubic => D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+            InterpolationMode::Lanczos => D2D1_INTERPOLATION_MODE_CUBIC, // 暫定
         };
     }
 

@@ -70,4 +70,5 @@ pub enum InterpolationMode {
     Linear,
     Cubic,
     HighQualityCubic,
+    Lanczos,
 }
