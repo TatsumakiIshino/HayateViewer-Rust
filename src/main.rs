@@ -347,7 +347,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 last_dialog_close = std::time::Instant::now();
                             } else {
                                 if modern_settings.is_none() {
-                                    match ui::modern_settings::ModernSettingsWindow::new(elwt, hwnd, &settings) {
+                                    match ui::modern_settings::ModernSettingsWindow::new(elwt, hwnd, &settings, proxy.clone()) {
                                         Ok(mw) => {
                                             modern_settings = Some(mw);
                                         }
@@ -895,14 +895,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Event::UserEvent(user_event) => {
-                match user_event {
-                    UserEvent::PageLoaded(_index) => {
-                        // 読み込み完了したインデックスをログ出力（デバッグ用）
-                        // println!("[イベント] ページ {} のロード完了を受信", _index);
-                        window.request_redraw();
-                    }
+            match user_event {
+                UserEvent::PageLoaded(_index) => {
+                    window.request_redraw();
+                }
+                UserEvent::ToggleSpreadView => {
+                    app_state.is_spread_view = !app_state.is_spread_view;
+                    settings.is_spread_view = app_state.is_spread_view;
+                    let _ = settings.save("config.json");
+                    view_state.reset();
+                    request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                    window.request_redraw();
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                }
+                UserEvent::ToggleBindingDirection => {
+                    app_state.binding_direction = match app_state.binding_direction {
+                        BindingDirection::Left => BindingDirection::Right,
+                        BindingDirection::Right => BindingDirection::Left,
+                    };
+                    settings.binding_direction = if app_state.binding_direction == BindingDirection::Right { "right".to_string() } else { "left".to_string() };
+                    let _ = settings.save("config.json");
+                    view_state.reset();
+                    request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                    window.request_redraw();
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
                 }
             }
+        }
             Event::AboutToWait => {
                 window.request_redraw();
             }

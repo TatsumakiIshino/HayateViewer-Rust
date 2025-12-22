@@ -1,11 +1,18 @@
-use crate::image::cache::SharedImageCache;
 use crate::image::ImageSource;
-use tokio::sync::mpsc;
+use crate::image::cache::SharedImageCache;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 pub enum LoaderRequest {
-    Load { index: usize, priority: i32, use_cpu_color_conversion: bool },
-    SetSource { source: ImageSource, path_key: String },
+    Load {
+        index: usize,
+        priority: i32,
+        use_cpu_color_conversion: bool,
+    },
+    SetSource {
+        source: ImageSource,
+        path_key: String,
+    },
     Clear,
     ClearPrefetch,
 }
@@ -21,6 +28,8 @@ pub enum LoaderResponse {
 #[allow(dead_code)]
 pub enum UserEvent {
     PageLoaded(usize),
+    ToggleSpreadView,
+    ToggleBindingDirection,
 }
 
 pub struct AsyncLoader {
@@ -29,7 +38,10 @@ pub struct AsyncLoader {
 }
 
 impl AsyncLoader {
-    pub fn new(cache: SharedImageCache, proxy: winit::event_loop::EventLoopProxy<UserEvent>) -> Arc<Self> {
+    pub fn new(
+        cache: SharedImageCache,
+        proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+    ) -> Arc<Self> {
         let (req_tx, mut req_rx) = mpsc::channel(500);
         let (res_tx, res_rx) = mpsc::channel(500);
 
@@ -71,32 +83,32 @@ impl AsyncLoader {
                 // 2. キューが空なら次のメッセージを待機
                 if queue.is_empty() {
                     match req_rx.recv().await {
-                        Some(req) => {
-                            match req {
-                                LoaderRequest::Clear => {
-                                    queue.clear();
-                                    continue;
-                                }
-                                LoaderRequest::ClearPrefetch => {
-                                    continue;
-                                }
-                                LoaderRequest::SetSource { source, path_key } => {
-                                    println!("[読み込み] ソースを設定: {}", path_key);
-                                    current_source = Some(source);
-                                    current_path_key = path_key;
-                                    queue.clear();
-                                    continue;
-                                }
-                                _ => queue.push_back(req),
+                        Some(req) => match req {
+                            LoaderRequest::Clear => {
+                                queue.clear();
+                                continue;
                             }
-                        }
+                            LoaderRequest::ClearPrefetch => {
+                                continue;
+                            }
+                            LoaderRequest::SetSource { source, path_key } => {
+                                println!("[読み込み] ソースを設定: {}", path_key);
+                                current_source = Some(source);
+                                current_path_key = path_key;
+                                queue.clear();
+                                continue;
+                            }
+                            _ => queue.push_back(req),
+                        },
                         None => break, // チャンネルクローズ
                     }
                 }
 
                 // 3. 最適なリクエストを選択
                 // Priority 0 (表示要求) を最優先し、その中でも最新のもの (rposition) を選ぶ
-                let next_req_idx = queue.iter().rposition(|r| matches!(r, LoaderRequest::Load { priority: 0, .. }));
+                let next_req_idx = queue
+                    .iter()
+                    .rposition(|r| matches!(r, LoaderRequest::Load { priority: 0, .. }));
                 let next_req = if let Some(pos) = next_req_idx {
                     queue.remove(pos).unwrap()
                 } else {
@@ -104,24 +116,36 @@ impl AsyncLoader {
                 };
 
                 match next_req {
-                    LoaderRequest::Load { index, priority, use_cpu_color_conversion } => {
+                    LoaderRequest::Load {
+                        index,
+                        priority,
+                        use_cpu_color_conversion,
+                    } => {
                         if let Some(ref mut _source) = current_source {
                             let key = format!("{}::{}", current_path_key, index);
-                            
+
                             let already_cached = {
                                 let mut c = cache_clone.lock().unwrap();
                                 c.get(&key).is_some()
                             };
- 
+
                             if !already_cached {
-                                println!("[読み込み] デコード中: インデックス {} (優先度 {})...", index, priority);
+                                println!(
+                                    "[読み込み] デコード中: インデックス {} (優先度 {})...",
+                                    index, priority
+                                );
                                 // 重い処理（特に7z一括展開）をスレッドプールに逃がす
                                 let mut source_for_task = current_source.take().unwrap();
-                                let (res, returned_source) = tokio::task::spawn_blocking(move || {
-                                    let r = source_for_task.load_image(index, use_cpu_color_conversion).map_err(|e| e.to_string());
-                                    (r, source_for_task)
-                                }).await.unwrap();
-                                
+                                let (res, returned_source) =
+                                    tokio::task::spawn_blocking(move || {
+                                        let r = source_for_task
+                                            .load_image(index, use_cpu_color_conversion)
+                                            .map_err(|e| e.to_string());
+                                        (r, source_for_task)
+                                    })
+                                    .await
+                                    .unwrap();
+
                                 current_source = Some(returned_source);
 
                                 match res {
@@ -131,10 +155,14 @@ impl AsyncLoader {
                                             c.insert(key.clone(), Arc::new(decoded));
                                         }
                                         let _ = res_tx.send(LoaderResponse::Loaded { index }).await;
-                                        let _ = event_proxy.send_event(UserEvent::PageLoaded(index));
+                                        let _ =
+                                            event_proxy.send_event(UserEvent::PageLoaded(index));
                                     }
                                     Err(e) => {
-                                        println!("[読み込み] デコード失敗 インデックス {}: {}", index, e);
+                                        println!(
+                                            "[読み込み] デコード失敗 インデックス {}: {}",
+                                            index, e
+                                        );
                                     }
                                 }
                             } else {

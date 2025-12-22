@@ -24,6 +24,7 @@ pub struct ModernSettingsWindow {
     pub mouse_pos: (f32, f32),
     pub is_clicking: bool,
     pub selected_tab: usize,
+    pub event_proxy: winit::event_loop::EventLoopProxy<crate::image::loader::UserEvent>,
 }
 
 impl ModernSettingsWindow {
@@ -31,6 +32,7 @@ impl ModernSettingsWindow {
         elwt: &EventLoopWindowTarget<T>,
         parent_hwnd: HWND,
         _settings: &Settings,
+        event_proxy: winit::event_loop::EventLoopProxy<crate::image::loader::UserEvent>,
     ) -> Result<Self> {
         let window = Arc::new(
             WindowBuilder::new()
@@ -129,6 +131,7 @@ impl ModernSettingsWindow {
                 mouse_pos: (0.0, 0.0),
                 is_clicking: false,
                 selected_tab: 0,
+                event_proxy,
             })
         }
     }
@@ -168,6 +171,37 @@ impl ModernSettingsWindow {
             };
             if self.is_in_rect(rect) {
                 self.selected_tab = i;
+                return;
+            }
+        }
+
+        // 全般タブ内のクリック判定
+        if self.selected_tab == 0 {
+            // 表示モードトグル (簡易的に上から順に判定)
+            let spread_rect = D2D_RECT_F {
+                left: 40.0,
+                top: 160.0,
+                right: 200.0,
+                bottom: 190.0,
+            };
+            if self.is_in_rect(spread_rect) {
+                let _ = self
+                    .event_proxy
+                    .send_event(crate::image::loader::UserEvent::ToggleSpreadView);
+                return;
+            }
+
+            let binding_rect = D2D_RECT_F {
+                left: 40.0,
+                top: 200.0,
+                right: 200.0,
+                bottom: 230.0,
+            };
+            if self.is_in_rect(binding_rect) {
+                let _ = self
+                    .event_proxy
+                    .send_event(crate::image::loader::UserEvent::ToggleBindingDirection);
+                return;
             }
         }
     }
@@ -319,6 +353,17 @@ impl ModernSettingsWindow {
     }
 
     fn draw_general_tab(&self, settings: &Settings) {
+        // ボタン描画
+        self.draw_button(
+            "表示モード切替",
+            40.0,
+            160.0,
+            160.0,
+            190.0,
+            settings.is_spread_view,
+        );
+        self.draw_button("綴じ方向切替", 40.0, 200.0, 160.0, 230.0, false);
+
         let binding_text = if settings.binding_direction == "left" {
             "左綴じ (Left)"
         } else {
@@ -331,10 +376,69 @@ impl ModernSettingsWindow {
         };
 
         let text = format!(
-            "■ 基本設定\n\n表示モード: {}\n綴じ方向: {}\n\n(※ ここから直接変更できるよう順次実装中)",
+            "■ 基本設定\n\n表示モード: {}\n綴じ方向: {}\n\n(※ 項目をクリックして変更できます)",
             spread_text, binding_text
         );
-        self.draw_debug_text(&text, 140.0);
+        self.draw_debug_text(&text, 250.0);
+    }
+
+    fn draw_button(&self, label: &str, left: f32, top: f32, width: f32, height: f32, active: bool) {
+        unsafe {
+            let rect = D2D_RECT_F {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height,
+            };
+            let is_hover = self.is_in_rect(rect);
+
+            let bg_color = if active {
+                D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.45,
+                    b: 0.85,
+                    a: 1.0,
+                }
+            } else if is_hover {
+                D2D1_COLOR_F {
+                    r: 0.3,
+                    g: 0.32,
+                    b: 0.35,
+                    a: 1.0,
+                }
+            } else {
+                D2D1_COLOR_F {
+                    r: 0.22,
+                    g: 0.23,
+                    b: 0.25,
+                    a: 1.0,
+                }
+            };
+
+            self.brush.SetColor(&bg_color);
+            self.context.FillRectangle(&rect, &self.brush);
+
+            self.brush.SetColor(&D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            });
+            let wide_label: Vec<u16> = label.encode_utf16().collect();
+            self.context.DrawText(
+                &wide_label,
+                &self.text_format,
+                &D2D_RECT_F {
+                    left: rect.left + 5.0,
+                    top: rect.top + 5.0,
+                    right: rect.right - 5.0,
+                    bottom: rect.bottom - 5.0,
+                },
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
     }
 
     fn draw_rendering_tab(&self, settings: &Settings) {
