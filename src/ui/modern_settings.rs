@@ -34,7 +34,7 @@ impl ModernSettingsWindow {
     ) -> Result<Self> {
         let window = Arc::new(
             WindowBuilder::new()
-                .with_title("HayateViewer Settings")
+                .with_title("HayateViewer 設定")
                 .with_inner_size(winit::dpi::LogicalSize::new(500.0, 600.0))
                 .with_resizable(false)
                 .build(elwt)
@@ -185,7 +185,7 @@ impl ModernSettingsWindow {
             self.context.Clear(Some(&D2D1_COLOR_F {
                 r: 0.1,
                 g: 0.11,
-                b: 0.12,
+                b: 0.13,
                 a: 1.0,
             }));
 
@@ -206,14 +206,14 @@ impl ModernSettingsWindow {
                 &self.brush,
             );
 
-            // タイトル描画
+            // タイトル描画 (日本語)
             self.brush.SetColor(&D2D1_COLOR_F {
                 r: 0.9,
                 g: 0.9,
                 b: 0.9,
                 a: 1.0,
             });
-            let title = "HayateViewer Settings";
+            let title = "HayateViewer 設定";
             let wide_title: Vec<u16> = title.encode_utf16().collect();
             let title_rect = D2D_RECT_F {
                 left: 20.0,
@@ -230,8 +230,8 @@ impl ModernSettingsWindow {
                 DWRITE_MEASURING_MODE_NATURAL,
             );
 
-            // タブ描画
-            let tabs = ["General", "Rendering", "About"];
+            // タブ描画 (日本語)
+            let tabs = ["全般", "レンダリング", "情報"];
             for (i, &name) in tabs.iter().enumerate() {
                 let rect = D2D_RECT_F {
                     left: 20.0 + i as f32 * 110.0,
@@ -251,16 +251,16 @@ impl ModernSettingsWindow {
                     }
                 } else if is_hover {
                     D2D1_COLOR_F {
-                        r: 0.2,
-                        g: 0.22,
-                        b: 0.25,
+                        r: 0.25,
+                        g: 0.26,
+                        b: 0.28,
                         a: 1.0,
                     }
                 } else {
                     D2D1_COLOR_F {
-                        r: 0.15,
-                        g: 0.16,
-                        b: 0.18,
+                        r: 0.18,
+                        g: 0.19,
+                        b: 0.21,
                         a: 1.0,
                     }
                 };
@@ -277,7 +277,12 @@ impl ModernSettingsWindow {
                 self.context.DrawText(
                     &wide_name,
                     &self.text_format,
-                    &rect,
+                    &D2D_RECT_F {
+                        left: rect.left + 10.0,
+                        top: rect.top + 5.0,
+                        right: rect.right - 10.0,
+                        bottom: rect.bottom - 5.0,
+                    },
                     &self.brush,
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
                     DWRITE_MEASURING_MODE_NATURAL,
@@ -286,15 +291,15 @@ impl ModernSettingsWindow {
 
             // 内容エリア背景
             self.brush.SetColor(&D2D1_COLOR_F {
-                r: 0.13,
-                g: 0.14,
-                b: 0.16,
+                r: 0.14,
+                g: 0.15,
+                b: 0.17,
                 a: 1.0,
             });
             self.context.FillRectangle(
                 &D2D_RECT_F {
                     left: 20.0,
-                    top: 120.0,
+                    top: 110.0,
                     right: 480.0,
                     bottom: 580.0,
                 },
@@ -314,23 +319,51 @@ impl ModernSettingsWindow {
     }
 
     fn draw_general_tab(&self, settings: &Settings) {
+        let binding_text = if settings.binding_direction == "left" {
+            "左綴じ (Left)"
+        } else {
+            "右綴じ (Right)"
+        };
+        let spread_text = if settings.is_spread_view {
+            "有効 (On)"
+        } else {
+            "無効 (Off)"
+        };
+
         let text = format!(
-            "Current Path: (Not yet integrated)\nBinding: {:?}",
-            settings.binding_direction
+            "■ 基本設定\n\n表示モード: {}\n綴じ方向: {}\n\n(※ ここから直接変更できるよう順次実装中)",
+            spread_text, binding_text
         );
         self.draw_debug_text(&text, 140.0);
     }
 
     fn draw_rendering_tab(&self, settings: &Settings) {
+        let backend = match settings.rendering_backend.as_str() {
+            "direct2d" => "Direct2D (推奨)",
+            "d3d11" => "Direct3D 11",
+            "opengl" => "OpenGL",
+            _ => &settings.rendering_backend,
+        };
+
         let text = format!(
-            "Backend: {}\nSpread View: {}",
-            settings.rendering_backend, settings.is_spread_view
+            "■ レンダリング設定\n\nバックエンド: {}\n見開き表示: {}\n\n(※ 変更の反映にはアプリの再起動が必要です)",
+            backend,
+            if settings.is_spread_view {
+                "有効"
+            } else {
+                "無効"
+            }
         );
         self.draw_debug_text(&text, 140.0);
     }
 
     fn draw_about_tab(&self) {
-        self.draw_debug_text("HayateViewer v0.4.4-test\nCreated by Tatsumaki", 140.0);
+        let version = env!("CARGO_PKG_VERSION");
+        let text = format!(
+            "HayateViewer v{}\n\n高速画像ビューア - Rust版\n\nCreated by Tatsumaki",
+            version
+        );
+        self.draw_debug_text(&text, 140.0);
     }
 
     fn draw_debug_text(&self, text: &str, top: f32) {
