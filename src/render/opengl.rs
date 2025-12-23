@@ -5,8 +5,21 @@ use glow::*;
 use glutin::context::PossiblyCurrentContext;
 use glutin::surface::{GlSurface, Surface, WindowSurface};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
+use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
-use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT;
+use windows::Win32::Graphics::DirectWrite::{
+    DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_ALIGNMENT_TRAILING,
+};
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CLIP_DEFAULT_PRECIS, CreateCompatibleDC,
+    CreateDIBSection, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY, DIB_RGB_COLORS,
+    DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject,
+    DrawTextW, FW_BOLD, FW_NORMAL, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor,
+    TRANSPARENT,
+};
+use windows::core::w;
 
 pub struct OpenGLRenderer {
     gl: Arc<glow::Context>,
@@ -30,6 +43,7 @@ pub struct OpenGLRenderer {
     u_interpolation_mode: UniformLocation,
     u_source_texture_size: UniformLocation,
     interpolation_mode: InterpolationMode,
+    text_alignment: AtomicI32,
 }
 
 impl OpenGLRenderer {
@@ -39,9 +53,12 @@ impl OpenGLRenderer {
         surface: Surface<WindowSurface>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         unsafe {
-            // ブレンディングの有効化 (UI の半透明表示に必須)
+            // ブレンディングの有効化
             gl.enable(BLEND);
             gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
+
+            // 色味が明るくなるのを防ぐため、sRGB変換を無効化（Direct2Dと合わせる）
+            gl.disable(FRAMEBUFFER_SRGB);
 
             // テクスチャアライメントの設定 (幅が4の倍数でない場合のため)
             gl.pixel_store_i32(UNPACK_ALIGNMENT, 1);
@@ -295,6 +312,7 @@ impl OpenGLRenderer {
                 u_interpolation_mode,
                 u_source_texture_size,
                 interpolation_mode: InterpolationMode::Linear,
+                text_alignment: AtomicI32::new(DWRITE_TEXT_ALIGNMENT_LEADING.0),
             })
         }
     }
@@ -579,18 +597,190 @@ impl Renderer for OpenGLRenderer {
         }
     }
 
-    fn draw_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, _stroke_width: f32) {
-        // 近似的に塗りつぶしで代用（外枠対応が必要な場合は別途実装）
-        self.fill_rectangle(rect, color);
+    fn draw_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, stroke_width: f32) {
+        // Draw 4 lines to form a hollow rectangle
+        // Top
+        self.fill_rectangle(
+            &D2D_RECT_F {
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.top + stroke_width,
+            },
+            color,
+        );
+        // Bottom
+        self.fill_rectangle(
+            &D2D_RECT_F {
+                left: rect.left,
+                top: rect.bottom - stroke_width,
+                right: rect.right,
+                bottom: rect.bottom,
+            },
+            color,
+        );
+        // Left
+        self.fill_rectangle(
+            &D2D_RECT_F {
+                left: rect.left,
+                top: rect.top + stroke_width,
+                right: rect.left + stroke_width,
+                bottom: rect.bottom - stroke_width,
+            },
+            color,
+        );
+        // Right
+        self.fill_rectangle(
+            &D2D_RECT_F {
+                left: rect.right - stroke_width,
+                top: rect.top + stroke_width,
+                right: rect.right,
+                bottom: rect.bottom - stroke_width,
+            },
+            color,
+        );
     }
 
-    fn draw_text(&self, _text: &str, _rect: &D2D_RECT_F, _color: &D2D1_COLOR_F, _large: bool) {
-        // OpenGL モードではテキスト描画はコンソールへのフォールバックのみ
-        // println!("[OpenGL UI] {}", text);
+    fn draw_text(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, large: bool) {
+        let width = (rect.right - rect.left).ceil() as i32;
+        let height = (rect.bottom - rect.top).ceil() as i32;
+        if width <= 0 || height <= 0 {
+            return;
+        }
+
+        unsafe {
+            let hdc = CreateCompatibleDC(None);
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let mut p_bits: *mut std::ffi::c_void = std::ptr::null_mut();
+            let hbitmap =
+                CreateDIBSection(Some(hdc), &info, DIB_RGB_COLORS, &mut p_bits, None, 0).unwrap();
+            let old_bitmap = SelectObject(hdc, windows::Win32::Graphics::Gdi::HGDIOBJ(hbitmap.0));
+
+            // Clear to transparent (0)
+            std::ptr::write_bytes(p_bits, 0, (width * height * 4) as usize);
+
+            let font_height = if large { 32 } else { 18 };
+            let weight = if large { FW_BOLD } else { FW_NORMAL };
+            let hfont = CreateFontW(
+                font_height,
+                0,
+                0,
+                0,
+                weight.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY,
+                DEFAULT_PITCH.0 as u32,
+                w!("Yu Gothic UI"),
+            );
+            let old_font = SelectObject(hdc, windows::Win32::Graphics::Gdi::HGDIOBJ(hfont.0));
+
+            SetTextColor(hdc, COLORREF(0x00FFFFFF)); // White
+            SetBkMode(hdc, TRANSPARENT);
+
+            let mut wide_text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut rect_gdi = RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            };
+
+            let alignment = DWRITE_TEXT_ALIGNMENT(self.text_alignment.load(Ordering::Relaxed));
+            let mut format = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
+            if alignment == DWRITE_TEXT_ALIGNMENT_CENTER {
+                format |= DT_CENTER;
+            } else if alignment == DWRITE_TEXT_ALIGNMENT_TRAILING {
+                format |= DT_RIGHT;
+            } else {
+                format |= DT_LEFT;
+            }
+
+            DrawTextW(hdc, &mut wide_text, &mut rect_gdi, format);
+
+            // Apply color and use luminance as alpha
+            let r = (color.r * 255.0) as u8;
+            let g = (color.g * 255.0) as u8;
+            let b = (color.b * 255.0) as u8;
+
+            let pixel_sl =
+                std::slice::from_raw_parts_mut(p_bits as *mut u32, (width * height) as usize);
+
+            for p in pixel_sl {
+                // GDI uses BGRA (little endian) -> 0xAARRGGBB in u32 but in bytes it is BB GG RR AA
+                // Text is white, so we can take any channel as intensity/alpha
+                let intensity = (*p & 0xFF) as u8; // Blue channel
+                if intensity > 0 {
+                    // Pre-multiplied alpha or straight alpha? Glow/OpenGL blending is usually configured.
+                    // Assuming gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA) and non-premultiplied texture?
+                    // Let's use straight alpha texture.
+                    // u32 is 0xAABBGGRR in Little Endian (R at lowest byte)? No.
+                    // 0xAABBGGRR on LE machine:
+                    // Byte 0: RR
+                    // Byte 1: GG
+                    // Byte 2: BB
+                    // Byte 3: AA
+                    // We need to form this u32.
+                    *p = ((intensity as u32) << 24)
+                        | ((b as u32) << 16)
+                        | ((g as u32) << 8)
+                        | (r as u32);
+                } else {
+                    *p = 0;
+                }
+            }
+
+            // Create texture
+            let tex = self
+                .create_texture_rgba8(
+                    width as u32,
+                    height as u32,
+                    std::slice::from_raw_parts(p_bits as *const u8, (width * height * 4) as usize),
+                )
+                .unwrap();
+
+            // Draw
+            self.draw_image(
+                &TextureHandle::OpenGL {
+                    id: std::mem::transmute_copy::<Texture, u32>(&tex),
+                    width: width as u32,
+                    height: height as u32,
+                },
+                rect,
+            );
+
+            // Cleanup texture
+            self.gl.delete_texture(tex);
+
+            // GDI Cleanup
+            let _ = SelectObject(hdc, old_font);
+            let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(hfont.0));
+            let _ = SelectObject(hdc, old_bitmap);
+            let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(hbitmap.0));
+            let _ = DeleteDC(hdc);
+        }
     }
 
     fn set_interpolation_mode(&mut self, mode: InterpolationMode) {
         self.interpolation_mode = mode;
     }
-    fn set_text_alignment(&self, _alignment: DWRITE_TEXT_ALIGNMENT) {}
+    fn set_text_alignment(&self, alignment: DWRITE_TEXT_ALIGNMENT) {
+        self.text_alignment.store(alignment.0, Ordering::Relaxed);
+    }
 }

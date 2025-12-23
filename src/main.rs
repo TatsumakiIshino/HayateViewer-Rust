@@ -597,15 +597,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 WindowEvent::MouseInput { state, button, .. } => {
                     match button {
                         MouseButton::Left => {
+                            if app_state.is_jump_open {
+                                if state == ElementState::Pressed {
+                                    let window_size = window.inner_size();
+                                    let win_w = window_size.width as f32;
+                                    let win_h = window_size.height as f32;
+                                    let jump_w = 340.0;
+                                    let jump_h = 160.0;
+                                    let jump_rect = D2D_RECT_F {
+                                        left: (win_w - jump_w) / 2.0,
+                                        top: (win_h - jump_h) / 2.0,
+                                        right: (win_w + jump_w) / 2.0,
+                                        bottom: (win_h + jump_h) / 2.0,
+                                    };
+                                    
+                                    // クリック位置がUI外なら閉じる
+                                    if view_state.cursor_pos.0 < jump_rect.left || view_state.cursor_pos.0 > jump_rect.right ||
+                                       view_state.cursor_pos.1 < jump_rect.top || view_state.cursor_pos.1 > jump_rect.bottom {
+                                        app_state.is_jump_open = false;
+                                        app_state.jump_input_buffer.clear();
+                                        window.request_redraw();
+                                    }
+                                }
+                                return;
+                            }
+
                             if state == ElementState::Pressed {
                                 let window_size = window.inner_size();
                                 let win_h = window_size.height as f32;
-                                let bar_h = 25.0;
+                                let status_bar_h = 22.0;
                                 let seek_bar_h = 8.0;
-                                let bar_y = if settings.show_status_bar_info { win_h - bar_h - seek_bar_h } else { win_h - seek_bar_h };
+                                // 描画ロジックと一致させる (win_h - 22.0 - 8.0)
+                                let bar_y = win_h - status_bar_h - seek_bar_h;
 
-                                // シークバークリック判定
-                                if app_state.show_seekbar && view_state.cursor_pos.1 >= bar_y && view_state.cursor_pos.1 <= bar_y + seek_bar_h {
+                                // シークバークリック判定 (少し判定を広げる: 上下 4px)
+                                let hit_margin = 4.0;
+                                if app_state.show_seekbar && view_state.cursor_pos.1 >= bar_y - hit_margin && view_state.cursor_pos.1 <= bar_y + seek_bar_h + hit_margin {
                                     app_state.is_dragging_seekbar = true;
                                     // 即座に位置を反映させるために CursorMoved と同じロジックを実行
                                     let win_w = window_size.width as f32;
@@ -633,6 +660,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         MouseButton::Right => {
+                            if app_state.is_jump_open { return; }
                             if state == ElementState::Pressed {
                                 view_state.is_loupe = true;
                                 view_state.loupe_base_zoom = view_state.zoom_level;
@@ -654,6 +682,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     window.request_redraw();
                 }
                 WindowEvent::MouseWheel { delta, .. } => {
+                    if app_state.is_jump_open { return; }
                     let scroll = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y,
                         MouseScrollDelta::PixelDelta(pos) => (pos.y / 120.0) as f32,
