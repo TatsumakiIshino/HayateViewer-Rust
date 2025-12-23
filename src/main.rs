@@ -135,6 +135,45 @@ fn update_status_bar_text(status_hwnd: HWND, text: &str) {
     }
 }
 
+fn load_new_source(
+    new_source: ImageSource,
+    path_str: String,
+    app_state: &mut AppState,
+    current_path_key: &mut String,
+    window: &winit::window::Window,
+    cpu_cache: &SharedImageCache,
+    loader: &Arc<AsyncLoader>,
+    rt: &Runtime,
+    settings: &Settings,
+    current_bitmaps: &mut Vec<(usize, crate::render::TextureHandle)>,
+) {
+    println!("ソースを読み込み: {} ({} 個のファイル/エントリ)", path_str, new_source.len());
+    if let ImageSource::Files(ref files) = new_source {
+        app_state.image_files = files.clone();
+    } else if let ImageSource::Archive(ref loader) = new_source {
+        app_state.image_files = loader.get_file_names().to_vec();
+    }
+    app_state.current_page_index = 0;
+    current_bitmaps.clear();
+    
+    // CPU キャッシュもクリア
+    if let Ok(mut cache) = cpu_cache.lock() {
+        cache.clear();
+    }
+    
+    *current_path_key = path_str.clone();
+    update_window_title(window, current_path_key, app_state);
+    
+    rt.block_on(loader.send_request(LoaderRequest::Clear));
+    let l_prefetch = Arc::clone(loader);
+    rt.spawn(async move { let _ = l_prefetch.send_request(LoaderRequest::ClearPrefetch).await; });
+    rt.block_on(loader.send_request(LoaderRequest::SetSource { 
+        source: new_source, 
+        path_key: path_str 
+    }));
+    request_pages_with_prefetch(app_state, loader, rt, cpu_cache, settings, current_path_key);
+}
+
 struct ViewState {
     zoom_level: f32,
     pan_offset: (f32, f32),
@@ -358,29 +397,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let path_str = path.to_string_lossy().to_string();
                     println!("ファイルをドロップ: {}", path_str);
                     if let Some(new_source) = get_image_source(&path_str) {
-                        println!("ソースを作成: {} 個のファイル/エントリ", new_source.len());
-                        if let ImageSource::Files(ref files) = new_source {
-                            app_state.image_files = files.clone();
-                        } else if let ImageSource::Archive(ref loader) = new_source {
-                            app_state.image_files = loader.get_file_names().to_vec();
-                        }
-                        app_state.current_page_index = 0;
-                        current_bitmaps.clear();
-                        
-                        // CPU キャッシュもクリア
-                        if let Ok(mut cache) = cpu_cache.lock() {
-                            cache.clear();
-                        }
-                        
-                        current_path_key = path_str.clone();
-                        update_window_title(&window, &current_path_key, &app_state);
-                        
-                        rt.block_on(loader.send_request(LoaderRequest::Clear));
-                        rt.block_on(loader.send_request(LoaderRequest::SetSource { 
-                            source: new_source, 
-                            path_key: path_str 
-                        }));
-                        request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                        load_new_source(
+                            new_source,
+                            path_str,
+                            &mut app_state,
+                            &mut current_path_key,
+                            &window,
+                            &cpu_cache,
+                            &loader,
+                            &rt,
+                            &settings,
+                            &mut current_bitmaps,
+                        );
                         window.request_redraw();
                     }
                 }
@@ -495,32 +523,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(new_path) = get_neighboring_source(&current_path_key, direction) {
                                     println!("フォルダ/アーカイブ移動: {}", new_path);
                                     if let Some(new_source) = get_image_source(&new_path) {
-                                        if let ImageSource::Files(ref files) = new_source {
-                                            app_state.image_files = files.clone();
-                                        } else if let ImageSource::Archive(ref loader) = new_source {
-                                            app_state.image_files = loader.get_file_names().to_vec();
-                                        }
-                                        app_state.current_page_index = 0;
-                                        current_bitmaps.clear();
-                                        
-                                        // CPU キャッシュもクリア
-                                        if let Ok(mut cache) = cpu_cache.lock() {
-                                            cache.clear();
-                                        }
-                                        
-                                        current_path_key = new_path.clone();
-                                        update_window_title(&window, &current_path_key, &app_state);
-                                        
-                                        // ローダーをクリアし、新しいソースを設定
-                                        rt.block_on(loader.send_request(LoaderRequest::Clear));
-                                        let l = loader.clone();
-                                        rt.spawn(async move { let _ = l.send_request(LoaderRequest::ClearPrefetch).await; });
-                                        rt.block_on(loader.send_request(LoaderRequest::SetSource { 
-                                            source: new_source, 
-                                            path_key: new_path 
-                                        }));
-                                        request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                                        load_new_source(
+                                            new_source,
+                                            new_path,
+                                            &mut app_state,
+                                            &mut current_path_key,
+                                            &window,
+                                            &cpu_cache,
+                                            &loader,
+                                            &rt,
+                                            &settings,
+                                            &mut current_bitmaps,
+                                        );
                                     }
+                                }
+                            }
+                        }
+                        Key::Character(ref s) if s.to_lowercase() == "f" => {
+                            let path = if modifiers.shift_key() {
+                                ui::dialogs::select_archive_file(hwnd)
+                            } else {
+                                ui::dialogs::select_folder(hwnd)
+                            };
+
+                            if let Some(new_path_buf) = path {
+                                let new_path = new_path_buf.to_string_lossy().to_string();
+                                if let Some(new_source) = get_image_source(&new_path) {
+                                    load_new_source(
+                                        new_source,
+                                        new_path,
+                                        &mut app_state,
+                                        &mut current_path_key,
+                                        &window,
+                                        &cpu_cache,
+                                        &loader,
+                                        &rt,
+                                        &settings,
+                                        &mut current_bitmaps,
+                                    );
                                 }
                             }
                         }
