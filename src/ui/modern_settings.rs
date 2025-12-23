@@ -536,6 +536,16 @@ impl ModernSettingsWindow {
             false,
             focus_idx == Some(3),
         );
+        self.draw_button(
+            "履歴件数",
+            &format!("{} 件", settings.max_history_count),
+            40.0,
+            370.0,
+            160.0,
+            30.0,
+            false,
+            focus_idx == Some(4),
+        );
     }
 
     fn draw_button(
@@ -944,7 +954,7 @@ impl ModernSettingsWindow {
 
     fn get_item_count(&self) -> usize {
         match self.selected_tab {
-            0 => 4, // 全般: 表示モード, 先頭単一, ステータスバー, ルーペ倍率
+            0 => 5, // 全般: 表示モード, 先頭単一, ステータスバー, ルーペ倍率, 履歴件数
             1 => 4, // レンダリング: エンジン, CPUサンプリング, GPUサンプリング, CPU色変換
             _ => 0,
         }
@@ -977,6 +987,16 @@ impl ModernSettingsWindow {
                     let _ = self
                         .event_proxy
                         .send_event(crate::image::loader::UserEvent::SetMagnifierZoom(next_zoom));
+                }
+                4 => {
+                    let next_count = if settings.max_history_count >= 50 {
+                        10
+                    } else {
+                        settings.max_history_count + 10
+                    };
+                    let _ = self.event_proxy.send_event(
+                        crate::image::loader::UserEvent::SetMaxHistoryCount(next_count),
+                    );
                 }
                 _ => {}
             }

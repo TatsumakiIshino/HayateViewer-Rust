@@ -1,0 +1,15 @@
+warning: unused `std::result::Result` that must be used
+   --> src\ui\history.rs:350:13
+    |
+350 |             self.swap_chain.Present(1, DXGI_PRESENT(0)).ok();
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+350 |             let _ = self.swap_chain.Present(1, DXGI_PRESENT(0)).ok();
+    |             +++++++
+
+warning: `hayate-viewer-rust` (bin "hayate-viewer-rust") generated 1 warning
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.27s

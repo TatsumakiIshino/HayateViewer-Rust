@@ -24,7 +24,7 @@ pub enum LoaderResponse {
 }
 
 // winit のカスタムイベント用
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum UserEvent {
     PageLoaded(usize),
@@ -38,6 +38,11 @@ pub enum UserEvent {
     RotateRenderingBackend,
     RotateDisplayMode,
     SetMagnifierZoom(f32),
+    LoadPath(String),
+    LoadHistory(usize),
+    ClearHistory,
+    DeleteHistoryItem(usize),
+    SetMaxHistoryCount(usize),
 }
 
 pub struct AsyncLoader {

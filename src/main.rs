@@ -32,7 +32,7 @@ use tokio::runtime::Runtime;
 use windows::Win32::Foundation::{HWND, WPARAM, LPARAM};
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, INITCOMMONCONTROLSEX, ICC_BAR_CLASSES, STATUSCLASSNAMEW,
-    SB_SETTEXTW,
+    SB_SETTEXTW, SB_SETPARTS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, SendMessageW, WS_CHILD, WS_VISIBLE,
@@ -114,7 +114,16 @@ fn create_status_bar(parent_hwnd: HWND) -> Option<HWND> {
         );
         
         if status_hwnd.is_ok() {
-            Some(status_hwnd.unwrap())
+            let sb_hwnd = status_hwnd.unwrap();
+            // パーツ幅をウィンドウ幅全体に設定
+            let parts: [i32; 1] = [-1];
+            SendMessageW(
+                sb_hwnd,
+                SB_SETPARTS,
+                Some(WPARAM(1)),
+                Some(LPARAM(parts.as_ptr() as isize)),
+            );
+            Some(sb_hwnd)
         } else {
             None
         }
@@ -135,25 +144,60 @@ fn update_status_bar_text(status_hwnd: HWND, text: &str) {
     }
 }
 
+fn sync_current_state_to_history(settings: &mut Settings, app_state: &AppState, current_path_key: &str) {
+    if current_path_key.is_empty() { return; }
+    let binding_str = if !app_state.is_spread_view {
+        "single"
+    } else if app_state.binding_direction == BindingDirection::Left {
+        "left"
+    } else {
+        "right"
+    };
+    settings.add_to_history(current_path_key.to_string(), app_state.current_page_index, binding_str.to_string());
+}
+
 fn load_new_source(
     new_source: ImageSource,
     path_str: String,
+    initial_page: usize,
+    initial_binding: Option<String>,
     app_state: &mut AppState,
     current_path_key: &mut String,
     window: &winit::window::Window,
     cpu_cache: &SharedImageCache,
     loader: &Arc<AsyncLoader>,
     rt: &Runtime,
-    settings: &Settings,
+    settings: &mut Settings,
     current_bitmaps: &mut Vec<(usize, crate::render::TextureHandle)>,
 ) {
     println!("ソースを読み込み: {} ({} 個のファイル/エントリ)", path_str, new_source.len());
+    
+    // 切り替え前に現在のファイルの状態（ページ・綴じ方向）を履歴に保存
+    sync_current_state_to_history(settings, app_state, current_path_key);
+
     if let ImageSource::Files(ref files) = new_source {
         app_state.image_files = files.clone();
     } else if let ImageSource::Archive(ref loader) = new_source {
         app_state.image_files = loader.get_file_names().to_vec();
     }
-    app_state.current_page_index = 0;
+
+    // 読み込み先の設定を反映（履歴からの復元用）
+    if let Some(binding) = initial_binding {
+        match binding.as_str() {
+            "single" => app_state.is_spread_view = false,
+            "left" => {
+                app_state.is_spread_view = true;
+                app_state.binding_direction = BindingDirection::Left;
+            }
+            "right" => {
+                app_state.is_spread_view = true;
+                app_state.binding_direction = BindingDirection::Right;
+            }
+            _ => {}
+        }
+    }
+
+    app_state.current_page_index = initial_page.min(app_state.image_files.len().saturating_sub(1));
     current_bitmaps.clear();
     
     // CPU キャッシュもクリア
@@ -169,8 +213,12 @@ fn load_new_source(
     rt.spawn(async move { let _ = l_prefetch.send_request(LoaderRequest::ClearPrefetch).await; });
     rt.block_on(loader.send_request(LoaderRequest::SetSource { 
         source: new_source, 
-        path_key: path_str 
+        path_key: path_str.clone() 
     }));
+
+    // 新しいファイルを履歴の先頭に追加
+    sync_current_state_to_history(settings, app_state, &path_str);
+    let _ = settings.save("config.json");
     request_pages_with_prefetch(app_state, loader, rt, cpu_cache, settings, current_path_key);
 }
 
@@ -336,31 +384,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     renderer.set_interpolation_mode(gpu_mode);
 
+    let mut current_bitmaps: Vec<(usize, crate::render::TextureHandle)> = Vec::new();
+
     // 初期パスの読み込み
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
         if let Some(src) = get_image_source(&args[1]) {
-            if let ImageSource::Files(ref files) = src {
-                app_state.image_files = files.clone();
-            } else if let ImageSource::Archive(ref loader) = src {
-                app_state.image_files = loader.get_file_names().to_vec();
-            }
-            current_path_key = args[1].clone();
-            update_window_title(&window, &current_path_key, &app_state);
-            rt.block_on(loader.send_request(LoaderRequest::Clear));
-            rt.block_on(loader.send_request(LoaderRequest::SetSource { 
-                source: src, 
-                path_key: current_path_key.clone() 
-            }));
-            request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+            load_new_source(
+                src,
+                args[1].clone(),
+                0,
+                None,
+                &mut app_state,
+                &mut current_path_key,
+                &window,
+                &cpu_cache,
+                &loader,
+                &rt,
+                &mut settings,
+                &mut current_bitmaps,
+            );
         }
     }
 
-    let mut current_bitmaps: Vec<(usize, crate::render::TextureHandle)> = Vec::new();
     let mut modifiers = ModifiersState::default();
     
     let mut last_dialog_close = std::time::Instant::now();
     let mut modern_settings: Option<ui::modern_settings::ModernSettingsWindow> = None;
+    let mut modern_history: Option<ui::history::HistoryWindow> = None;
 
     event_loop.run(move |event: Event<UserEvent>, elwt: &winit::event_loop::EventLoopWindowTarget<UserEvent>| {
         elwt.set_control_flow(ControlFlow::Wait);
@@ -371,8 +422,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if ms.window.id() == window_id {
                         if ms.handle_event(&event, &settings) {
                             modern_settings = None;
+                            last_dialog_close = std::time::Instant::now();
                         } else if matches!(event, WindowEvent::RedrawRequested) {
                             ms.draw(&settings);
+                        }
+                        return;
+                    }
+                }
+
+                if let Some(ref mut mh) = modern_history {
+                    if mh.window.id() == window_id {
+                        if mh.handle_event(&event, &settings) {
+                            modern_history = None;
+                            last_dialog_close = std::time::Instant::now();
+                        } else if matches!(event, WindowEvent::RedrawRequested) {
+                            mh.draw(&settings);
                         }
                         return;
                     }
@@ -383,6 +447,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match event {
                 WindowEvent::CloseRequested => {
                     println!("終了リクエストを受信しました。終了します...");
+                    // 終了前に現在の状態を保存
+                    sync_current_state_to_history(&mut settings, &app_state, &current_path_key);
+                    let _ = settings.save("config.json");
                     elwt.exit();
                     // 非同期タスクがブロッキングしている場合に備え、プロセスを強制終了
                     std::process::exit(0);
@@ -390,7 +457,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 WindowEvent::Resized(physical_size) => {
                     let _ = renderer.resize(physical_size.width, physical_size.height);
                     if let Some(sb_hwnd) = status_bar_hwnd {
-                        unsafe { SendMessageW(sb_hwnd, WM_SIZE, Some(WPARAM(0)), Some(LPARAM(0))); }
+                        unsafe {
+                            SendMessageW(sb_hwnd, WM_SIZE, Some(WPARAM(0)), Some(LPARAM(0)));
+                            // ステータスバーのパーツ幅をウィンドウ幅全体に設定
+                            let parts: [i32; 1] = [-1]; // -1 = ウィンドウ幅全体
+                            SendMessageW(
+                                sb_hwnd,
+                                SB_SETPARTS,
+                                Some(WPARAM(1)),
+                                Some(LPARAM(parts.as_ptr() as isize)),
+                            );
+                        }
                     }
                 }
                 WindowEvent::DroppedFile(path) => {
@@ -400,13 +477,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         load_new_source(
                             new_source,
                             path_str,
+                            0,
+                            None,
                             &mut app_state,
                             &mut current_path_key,
                             &window,
                             &cpu_cache,
                             &loader,
                             &rt,
-                            &settings,
+                            &mut settings,
                             &mut current_bitmaps,
                         );
                         window.request_redraw();
@@ -485,6 +564,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app_state.show_seekbar = !app_state.show_seekbar;
                             }
                         }
+                        Key::Character(ref s) if s.to_lowercase() == "r" => {
+                            // R: 履歴ウィンドウを開く
+                            if last_dialog_close.elapsed() < std::time::Duration::from_millis(500) {
+                                return;
+                            }
+                            
+                            if modern_history.is_none() {
+                                match ui::history::HistoryWindow::new(elwt, hwnd, &settings, proxy.clone()) {
+                                    Ok(hw) => {
+                                        modern_history = Some(hw);
+                                    }
+                                    Err(e) => {
+                                        println!("Failed to open History Window: {:?}", e);
+                                    }
+                                }
+                            }
+                            last_dialog_close = std::time::Instant::now();
+                        }
                         Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowLeft) => {
                             // ページ移動
                             let direction = if logical_key == Key::Named(NamedKey::ArrowRight) { 1 } else { -1 };
@@ -526,13 +623,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         load_new_source(
                                             new_source,
                                             new_path,
+                                            0,
+                                            None,
                                             &mut app_state,
                                             &mut current_path_key,
                                             &window,
                                             &cpu_cache,
                                             &loader,
                                             &rt,
-                                            &settings,
+                                            &mut settings,
                                             &mut current_bitmaps,
                                         );
                                     }
@@ -552,13 +651,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     load_new_source(
                                         new_source,
                                         new_path,
+                                        0,
+                                        None,
                                         &mut app_state,
                                         &mut current_path_key,
                                         &window,
                                         &cpu_cache,
                                         &loader,
                                         &rt,
-                                        &settings,
+                                        &mut settings,
                                         &mut current_bitmaps,
                                     );
                                 }
@@ -928,7 +1029,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let gpu_indices: Vec<usize> = current_bitmaps.iter().map(|(idx, _)| *idx).collect();
 
-                    let path_preview: String = current_path_key.chars().take(20).collect();
+                    let path_preview: String = current_path_key.clone();
                     
                     let spread_info = if app_state.is_spread_view {
                         let binding = if app_state.binding_direction == BindingDirection::Right { "右" } else { "左" };
@@ -1178,8 +1279,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = settings.save("config.json");
                     if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
                 }
+                UserEvent::LoadPath(path) => {
+                    if let Some(new_source) = get_image_source(&path) {
+                        load_new_source(
+                            new_source,
+                            path,
+                            0, // デフォルト
+                            None, // デフォルト
+                            &mut app_state,
+                            &mut current_path_key,
+                            &window,
+                            &cpu_cache,
+                            &loader,
+                            &rt,
+                            &mut settings,
+                            &mut current_bitmaps,
+                        );
+                        window.request_redraw();
+                    }
+                }
+                UserEvent::LoadHistory(idx) => {
+                    if let Some(item) = settings.history.get(idx).cloned() {
+                        if let Some(new_source) = get_image_source(&item.path) {
+                            load_new_source(
+                                new_source,
+                                item.path,
+                                item.page,
+                                Some(item.binding),
+                                &mut app_state,
+                                &mut current_path_key,
+                                &window,
+                                &cpu_cache,
+                                &loader,
+                                &rt,
+                                &mut settings,
+                                &mut current_bitmaps,
+                            );
+                            window.request_redraw();
+                        }
+                    }
+                }
+                UserEvent::ClearHistory => {
+                    settings.clear_history();
+                    let _ = settings.save("config.json");
+                    if let Some(ref mut mh) = modern_history { mh.window.request_redraw(); }
+                }
+                UserEvent::DeleteHistoryItem(idx) => {
+                    settings.remove_from_history(idx);
+                    let _ = settings.save("config.json");
+                    if let Some(ref mut mh) = modern_history { mh.window.request_redraw(); }
+                }
+                UserEvent::SetMaxHistoryCount(count) => {
+                    settings.max_history_count = count;
+                    let _ = settings.save("config.json");
+                }
             }
-        }
+        },
             Event::AboutToWait => {
                 window.request_redraw();
             }

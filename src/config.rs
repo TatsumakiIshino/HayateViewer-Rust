@@ -3,6 +3,13 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HistoryItem {
+    pub path: String,
+    pub page: usize,
+    pub binding: String, // "left", "right", "single"
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub rendering_backend: String,
     pub is_spread_view: bool,
@@ -21,6 +28,8 @@ pub struct Settings {
     pub show_status_bar_info: bool,
     pub use_cpu_color_conversion: bool,
     pub magnifier_zoom: f32,
+    pub history: Vec<HistoryItem>,
+    pub max_history_count: usize,
 }
 
 impl Default for Settings {
@@ -43,6 +52,8 @@ impl Default for Settings {
             show_status_bar_info: true,
             use_cpu_color_conversion: false,
             magnifier_zoom: 2.0,
+            history: Vec::new(),
+            max_history_count: 50,
         }
     }
 }
@@ -60,5 +71,31 @@ impl Settings {
     pub fn save<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
         let content = serde_json::to_string_pretty(self).unwrap();
         fs::write(path, content)
+    }
+
+    pub fn add_to_history(&mut self, path: String, page: usize, binding: String) {
+        // すでに存在する場合は一旦削除して先頭に持ってくる
+        self.history.retain(|item| item.path != path);
+        self.history.insert(
+            0,
+            HistoryItem {
+                path,
+                page,
+                binding,
+            },
+        );
+        if self.history.len() > self.max_history_count {
+            self.history.truncate(self.max_history_count);
+        }
+    }
+
+    pub fn remove_from_history(&mut self, index: usize) {
+        if index < self.history.len() {
+            self.history.remove(index);
+        }
+    }
+
+    pub fn clear_history(&mut self) {
+        self.history.clear();
     }
 }
