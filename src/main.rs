@@ -169,11 +169,14 @@ fn load_new_source(
     rt: &Runtime,
     settings: &mut Settings,
     current_bitmaps: &mut Vec<(usize, crate::render::TextureHandle)>,
+    skip_history_update: bool,  // 履歴ナビゲーション時は true にして履歴の順序を保持
 ) {
     println!("ソースを読み込み: {} ({} 個のファイル/エントリ)", path_str, new_source.len());
     
     // 切り替え前に現在のファイルの状態（ページ・綴じ方向）を履歴に保存
-    sync_current_state_to_history(settings, app_state, current_path_key);
+    if !skip_history_update {
+        sync_current_state_to_history(settings, app_state, current_path_key);
+    }
 
     if let ImageSource::Files(ref files) = new_source {
         app_state.image_files = files.clone();
@@ -198,6 +201,8 @@ fn load_new_source(
     }
 
     app_state.current_page_index = initial_page.min(app_state.image_files.len().saturating_sub(1));
+    // 新しいソースを読み込む際は履歴インデックスをリセット（履歴からの読み込み時は呼び出し元で設定）
+    app_state.current_history_index = None;
     current_bitmaps.clear();
     
     // CPU キャッシュもクリア
@@ -216,9 +221,11 @@ fn load_new_source(
         path_key: path_str.clone() 
     }));
 
-    // 新しいファイルを履歴の先頭に追加
-    sync_current_state_to_history(settings, app_state, &path_str);
-    let _ = settings.save("config.json");
+    // 新しいファイルを履歴の先頭に追加（履歴ナビゲーション時はスキップ）
+    if !skip_history_update {
+        sync_current_state_to_history(settings, app_state, &path_str);
+        let _ = settings.save("config.json");
+    }
     request_pages_with_prefetch(app_state, loader, rt, cpu_cache, settings, current_path_key);
 }
 
@@ -403,6 +410,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &rt,
                 &mut settings,
                 &mut current_bitmaps,
+                false, // 通常のファイル読み込み
             );
         }
     }
@@ -487,6 +495,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &rt,
                             &mut settings,
                             &mut current_bitmaps,
+                            false, // 通常のファイル読み込み
                         );
                         window.request_redraw();
                     }
@@ -608,6 +617,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     app_state.is_spread_view = false;
                                 }
                         }
+                        Key::Named(NamedKey::PageUp) | Key::Named(NamedKey::PageDown) => {
+                            // PageUp/PageDown: 履歴を順にナビゲート
+                            let history_len = settings.history.len();
+                            if history_len == 0 {
+                                app_state.status_message = Some(("履歴がありません".to_string(), std::time::Instant::now()));
+                            } else {
+                                let is_page_up = logical_key == Key::Named(NamedKey::PageUp);
+                                let direction = if is_page_up { -1isize } else { 1isize };
+                                
+                                // 現在の履歴インデックスを取得（未設定なら現在のパスから検索）
+                                let current_idx = app_state.current_history_index.unwrap_or_else(|| {
+                                    // 現在開いているファイルが履歴の何番目かを検索
+                                    settings.history.iter()
+                                        .position(|item| item.path == current_path_key)
+                                        .unwrap_or(0)
+                                });
+                                
+                                // 端に達しているかチェック
+                                if is_page_up && current_idx == 0 {
+                                    app_state.status_message = Some(("これ以上新しい履歴はありません".to_string(), std::time::Instant::now()));
+                                    app_state.current_history_index = Some(0);
+                                } else if !is_page_up && current_idx >= history_len - 1 {
+                                    app_state.status_message = Some(("これ以上古い履歴はありません".to_string(), std::time::Instant::now()));
+                                    app_state.current_history_index = Some(history_len - 1);
+                                } else {
+                                    let new_idx = (current_idx as isize + direction) as usize;
+                                    
+                                    if let Some(item) = settings.history.get(new_idx).cloned() {
+                                        // 現在表示中のファイルと同じ場合はスキップ
+                                        if item.path != current_path_key {
+                                            if let Some(new_source) = get_image_source(&item.path) {
+                                                app_state.current_history_index = Some(new_idx);
+                                                load_new_source(
+                                                    new_source,
+                                                    item.path,
+                                                    item.page,
+                                                    Some(item.binding),
+                                                    &mut app_state,
+                                                    &mut current_path_key,
+                                                    &window,
+                                                    &cpu_cache,
+                                                    &loader,
+                                                    &rt,
+                                                    &mut settings,
+                                                    &mut current_bitmaps,
+                                                    true, // 履歴ナビゲーション: 履歴への再追加をスキップ
+                                                );
+                                                app_state.status_message = Some((
+                                                    format!("履歴: {}/{}", new_idx + 1, history_len),
+                                                    std::time::Instant::now()
+                                                ));
+                                            }
+                                        } else {
+                                            // 同じファイルなのでインデックスだけ更新
+                                            app_state.current_history_index = Some(new_idx);
+                                            app_state.status_message = Some((
+                                                format!("履歴: {}/{} (現在のファイル)", new_idx + 1, history_len),
+                                                std::time::Instant::now()
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         Key::Named(NamedKey::Escape) => {
                             if app_state.is_jump_open {
                                 app_state.is_jump_open = false;
@@ -633,6 +706,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             &rt,
                                             &mut settings,
                                             &mut current_bitmaps,
+                                            false, // 通常のファイル読み込み
                                         );
                                     }
                                 }
@@ -661,6 +735,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         &rt,
                                         &mut settings,
                                         &mut current_bitmaps,
+                                        false, // 通常のファイル読み込み
                                     );
                                 }
                             }
@@ -1065,7 +1140,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // ステータスバーは常に更新
                     if let Some(sb_hwnd) = status_bar_hwnd {
-                        update_status_bar_text(sb_hwnd, &status_text);
+                        // 一時メッセージがあれば優先表示（2秒間）
+                        let display_text = if let Some((ref msg, start_time)) = app_state.status_message {
+                            if start_time.elapsed() < std::time::Duration::from_secs(2) {
+                                msg.clone()
+                            } else {
+                                app_state.status_message = None;
+                                status_text.clone()
+                            }
+                        } else {
+                            status_text.clone()
+                        };
+                        update_status_bar_text(sb_hwnd, &display_text);
                     }
 
                     // タイトルバー更新（ファイル名を表示、解像度はTODO）
@@ -1294,6 +1380,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &rt,
                             &mut settings,
                             &mut current_bitmaps,
+                            false, // 通常のファイル読み込み
                         );
                         window.request_redraw();
                     }
@@ -1301,6 +1388,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 UserEvent::LoadHistory(idx) => {
                     if let Some(item) = settings.history.get(idx).cloned() {
                         if let Some(new_source) = get_image_source(&item.path) {
+                            app_state.current_history_index = Some(idx);
                             load_new_source(
                                 new_source,
                                 item.path,
@@ -1314,6 +1402,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &rt,
                                 &mut settings,
                                 &mut current_bitmaps,
+                                true, // 履歴ナビゲーション: 履歴への再追加をスキップ
                             );
                             window.request_redraw();
                         }
@@ -1326,6 +1415,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 UserEvent::DeleteHistoryItem(idx) => {
                     settings.remove_from_history(idx);
+                    // 履歴インデックスを調整
+                    if let Some(current_idx) = app_state.current_history_index {
+                        if idx < current_idx {
+                            app_state.current_history_index = Some(current_idx - 1);
+                        } else if idx == current_idx {
+                            app_state.current_history_index = None;
+                        }
+                    }
                     let _ = settings.save("config.json");
                     if let Some(ref mut mh) = modern_history { mh.window.request_redraw(); }
                 }

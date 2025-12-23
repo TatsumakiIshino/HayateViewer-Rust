@@ -9,6 +9,10 @@ pub struct AppState {
     pub jump_input_buffer: String,
     pub show_seekbar: bool,
     pub is_dragging_seekbar: bool,
+    /// 履歴ナビゲーション用: 現在の履歴インデックス (None = 履歴未使用)
+    pub current_history_index: Option<usize>,
+    /// ステータスバーに表示する一時メッセージ ((メッセージ, 表示開始時刻))
+    pub status_message: Option<(String, std::time::Instant)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +34,8 @@ impl AppState {
             jump_input_buffer: String::new(),
             show_seekbar: false,
             is_dragging_seekbar: false,
+            current_history_index: None,
+            status_message: None,
         }
     }
 
