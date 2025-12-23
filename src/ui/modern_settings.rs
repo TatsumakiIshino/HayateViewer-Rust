@@ -20,6 +20,8 @@ pub struct ModernSettingsWindow {
     pub swap_chain: IDXGISwapChain1,
     pub brush: ID2D1SolidColorBrush,
     pub text_format: IDWriteTextFormat,
+    pub text_format_title: IDWriteTextFormat,
+    pub text_format_small: IDWriteTextFormat,
     // マウス状態
     pub mouse_pos: (f32, f32),
     pub is_clicking: bool,
@@ -113,12 +115,30 @@ impl ModernSettingsWindow {
             )?;
             let dw_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let text_format = dw_factory.CreateTextFormat(
-                w!("Segoe UI"),
+                w!("Yu Gothic UI"),
                 None,
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                14.0,
+                15.0,
+                w!("ja-jp"),
+            )?;
+            let text_format_title = dw_factory.CreateTextFormat(
+                w!("Yu Gothic UI"),
+                None,
+                DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                22.0,
+                w!("ja-jp"),
+            )?;
+            let text_format_small = dw_factory.CreateTextFormat(
+                w!("Yu Gothic UI"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                13.0,
                 w!("ja-jp"),
             )?;
 
@@ -130,6 +150,8 @@ impl ModernSettingsWindow {
                 swap_chain,
                 brush,
                 text_format,
+                text_format_title,
+                text_format_small,
                 mouse_pos: (0.0, 0.0),
                 is_clicking: false,
                 selected_tab: 0,
@@ -149,11 +171,15 @@ impl ModernSettingsWindow {
                         Key::Named(NamedKey::ArrowLeft) => {
                             if self.is_focus_on_tabs {
                                 self.selected_tab = (self.selected_tab + 2) % 3;
+                            } else {
+                                self.handle_action_at(self.focus_index);
                             }
                         }
                         Key::Named(NamedKey::ArrowRight) => {
                             if self.is_focus_on_tabs {
                                 self.selected_tab = (self.selected_tab + 1) % 3;
+                            } else {
+                                self.handle_action_at(self.focus_index);
                             }
                         }
                         Key::Named(NamedKey::ArrowDown) => {
@@ -306,17 +332,17 @@ impl ModernSettingsWindow {
                 b: 0.9,
                 a: 1.0,
             });
-            let title = "HayateViewer 設定";
+            let title = "HayateViewer Settings";
             let wide_title: Vec<u16> = title.encode_utf16().collect();
             let title_rect = D2D_RECT_F {
                 left: 20.0,
-                top: 18.0,
+                top: 15.0,
                 right: 480.0,
                 bottom: 50.0,
             };
             self.context.DrawText(
                 &wide_title,
-                &self.text_format,
+                &self.text_format_title,
                 &title_rect,
                 &self.brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -359,7 +385,13 @@ impl ModernSettingsWindow {
                     }
                 };
                 self.brush.SetColor(&bg_color);
-                self.context.FillRectangle(&rect, &self.brush);
+                let rounded_rect = D2D1_ROUNDED_RECT {
+                    rect,
+                    radiusX: 6.0,
+                    radiusY: 6.0,
+                };
+                self.context
+                    .FillRoundedRectangle(&rounded_rect, &self.brush);
 
                 if is_focused {
                     self.brush.SetColor(&D2D1_COLOR_F {
@@ -368,7 +400,8 @@ impl ModernSettingsWindow {
                         b: 1.0,
                         a: 1.0,
                     });
-                    self.context.DrawRectangle(&rect, &self.brush, 2.0, None);
+                    self.context
+                        .DrawRoundedRectangle(&rounded_rect, &self.brush, 2.0, None);
                 }
 
                 self.brush.SetColor(&D2D1_COLOR_F {
@@ -378,19 +411,31 @@ impl ModernSettingsWindow {
                     a: 1.0,
                 });
                 let wide_name: Vec<u16> = name.encode_utf16().collect();
+
+                // テキストを中央揃えにするために一時的にプロパティを変更
+                self.text_format
+                    .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)
+                    .unwrap();
+                self.text_format
+                    .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)
+                    .unwrap();
+
                 self.context.DrawText(
                     &wide_name,
                     &self.text_format,
-                    &D2D_RECT_F {
-                        left: rect.left + 10.0,
-                        top: rect.top + 5.0,
-                        right: rect.right - 10.0,
-                        bottom: rect.bottom - 5.0,
-                    },
+                    &rect,
                     &self.brush,
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
                     DWRITE_MEASURING_MODE_NATURAL,
                 );
+
+                // 元に戻す
+                self.text_format
+                    .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)
+                    .unwrap();
+                self.text_format
+                    .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)
+                    .unwrap();
             }
 
             // 内容エリア背景
@@ -413,7 +458,7 @@ impl ModernSettingsWindow {
             match self.selected_tab {
                 0 => self.draw_general_tab(settings),
                 1 => self.draw_rendering_tab(settings),
-                2 => self.draw_about_tab(),
+                2 => self.draw_about_tab(settings),
                 _ => {}
             }
 
@@ -665,13 +710,196 @@ impl ModernSettingsWindow {
         );
     }
 
-    fn draw_about_tab(&self) {
+    fn draw_about_tab(&self, settings: &Settings) {
         let version = env!("CARGO_PKG_VERSION");
-        let text = format!(
-            "HayateViewer v{}\n\n高速画像ビューア - Rust版\n\nCreated by Tatsumaki",
-            version
-        );
-        self.draw_debug_text(&text, 140.0);
+
+        unsafe {
+            let mut ellipse = D2D1_ELLIPSE {
+                point: std::mem::zeroed(),
+                radiusX: 25.0,
+                radiusY: 25.0,
+            };
+            ellipse.point.X = 70.0;
+            ellipse.point.Y = 170.0;
+            let icon_center = ellipse.point;
+
+            // 青い輪
+            self.brush.SetColor(&D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.5,
+                b: 1.0,
+                a: 1.0,
+            });
+            self.context.DrawEllipse(&ellipse, &self.brush, 3.0, None);
+
+            // 中央の "i"
+            let i_rect = D2D_RECT_F {
+                left: icon_center.X - 10.0,
+                top: icon_center.Y - 15.0,
+                right: icon_center.X + 10.0,
+                bottom: icon_center.Y + 15.0,
+            };
+            let wide_i: Vec<u16> = "i".encode_utf16().collect();
+            self.brush.SetColor(&D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            });
+            self.text_format_title
+                .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)
+                .unwrap();
+            self.context.DrawText(
+                &wide_i,
+                &self.text_format_title,
+                &i_rect,
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+            self.text_format_title
+                .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)
+                .unwrap();
+
+            // 2. タイトル
+            let title_rect = D2D_RECT_F {
+                left: 115.0,
+                top: 153.0,
+                right: 460.0,
+                bottom: 200.0,
+            };
+            let title_text = "HayateViewer Rust";
+            let wide_title: Vec<u16> = title_text.encode_utf16().collect();
+            self.context.DrawText(
+                &wide_title,
+                &self.text_format_title,
+                &title_rect,
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+
+            // 3. 詳細リスト
+            let start_x = 115.0;
+            let start_y = 205.0;
+            let row_height = 24.0;
+            let label_width = 130.0;
+
+            let infos = [
+                ("Version", version),
+                ("Renderer", &settings.rendering_backend),
+                (
+                    "Parallel Workers",
+                    &settings.parallel_decoding_workers.to_string(),
+                ),
+                (
+                    "CPU Resampling",
+                    self.get_resampling_name(&settings.resampling_mode_cpu),
+                ),
+                (
+                    "GPU Resampling",
+                    self.get_resampling_name(&settings.resampling_mode_gpu),
+                ),
+                (
+                    "Max Cache Size",
+                    &format!("{} MB", settings.max_cache_size_mb),
+                ),
+                (
+                    "Prefetch (CPU)",
+                    &format!("{} pages", settings.cpu_max_prefetch_pages),
+                ),
+                (
+                    "Prefetch (GPU)",
+                    &format!("{} pages", settings.gpu_max_prefetch_pages),
+                ),
+                ("OS", "Windows (x86_64)"),
+                ("Developed by", "Tatsumaki Ishino\nKID Project Team"),
+            ];
+
+            for (i, (label, value)) in infos.iter().enumerate() {
+                let y = start_y + i as f32 * row_height;
+
+                // ラベル (グレー)
+                self.brush.SetColor(&D2D1_COLOR_F {
+                    r: 0.6,
+                    g: 0.6,
+                    b: 0.6,
+                    a: 1.0,
+                });
+                let label_rect = D2D_RECT_F {
+                    left: start_x,
+                    top: y,
+                    right: start_x + label_width,
+                    bottom: y + row_height,
+                };
+                let wide_label: Vec<u16> = label.encode_utf16().collect();
+                self.context.DrawText(
+                    &wide_label,
+                    &self.text_format,
+                    &label_rect,
+                    &self.brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+
+                // 値 (白)
+                self.brush.SetColor(&D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                });
+                let val_rect = D2D_RECT_F {
+                    left: start_x + label_width,
+                    top: y,
+                    right: 460.0,
+                    bottom: y + row_height * 2.0, // 改行に対応するため高さを確保
+                };
+                let wide_val: Vec<u16> = value.encode_utf16().collect();
+                self.context.DrawText(
+                    &wide_val,
+                    &self.text_format,
+                    &val_rect,
+                    &self.brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
+
+            // 4. フッタークレジット
+            let footer_text = "© 2024 Tatsumaki Ishino. All rights reserved.";
+            let footer_rect = D2D_RECT_F {
+                left: 40.0,
+                top: 545.0,
+                right: 460.0,
+                bottom: 570.0,
+            };
+            let wide_footer: Vec<u16> = footer_text.encode_utf16().collect();
+            self.brush.SetColor(&D2D1_COLOR_F {
+                r: 0.4,
+                g: 0.4,
+                b: 0.4,
+                a: 1.0,
+            });
+            self.context.DrawText(
+                &wide_footer,
+                &self.text_format_small,
+                &footer_rect,
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+
+    fn get_resampling_name(&self, mode: &str) -> &'static str {
+        match mode {
+            "PIL_NEAREST" | "Nearest" => "Nearest Neighbor",
+            "PIL_BILINEAR" | "Bilinear" => "Bilinear",
+            "PIL_BICUBIC" | "Bicubic" => "Bicubic",
+            "Lanczos" | "Lanczos3" => "Lanczos3",
+            _ => "Unknown",
+        }
     }
 
     fn draw_debug_text(&self, text: &str, top: f32) {
