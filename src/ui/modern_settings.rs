@@ -162,7 +162,7 @@ impl ModernSettingsWindow {
         }
     }
 
-    pub fn handle_event(&mut self, event: &WindowEvent) -> bool {
+    pub fn handle_event(&mut self, event: &WindowEvent, settings: &Settings) -> bool {
         match event {
             WindowEvent::KeyboardInput { event: req, .. } => {
                 if req.state == ElementState::Pressed {
@@ -172,14 +172,14 @@ impl ModernSettingsWindow {
                             if self.is_focus_on_tabs {
                                 self.selected_tab = (self.selected_tab + 2) % 3;
                             } else {
-                                self.handle_action_at(self.focus_index);
+                                self.handle_action_at(self.focus_index, settings);
                             }
                         }
                         Key::Named(NamedKey::ArrowRight) => {
                             if self.is_focus_on_tabs {
                                 self.selected_tab = (self.selected_tab + 1) % 3;
                             } else {
-                                self.handle_action_at(self.focus_index);
+                                self.handle_action_at(self.focus_index, settings);
                             }
                         }
                         Key::Named(NamedKey::ArrowDown) => {
@@ -204,7 +204,7 @@ impl ModernSettingsWindow {
                         }
                         Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
                             if !self.is_focus_on_tabs {
-                                self.handle_action_at(self.focus_index);
+                                self.handle_action_at(self.focus_index, settings);
                             }
                         }
                         Key::Named(NamedKey::Tab) => {
@@ -231,7 +231,7 @@ impl ModernSettingsWindow {
             } => {
                 self.is_clicking = *state == ElementState::Pressed;
                 if !self.is_clicking {
-                    self.handle_click();
+                    self.handle_click(settings);
                 }
                 self.window.request_redraw();
                 false
@@ -240,7 +240,7 @@ impl ModernSettingsWindow {
         }
     }
 
-    fn handle_click(&mut self) {
+    fn handle_click(&mut self, settings: &Settings) {
         // タブ切り替え判定
         for i in 0..3 {
             let rect = D2D_RECT_F {
@@ -257,7 +257,7 @@ impl ModernSettingsWindow {
 
         // 全般タブ内のクリック判定
         if self.selected_tab == 0 {
-            let items = [210.0, 250.0, 290.0];
+            let items = [210.0, 250.0, 290.0, 330.0];
             for (idx, &top) in items.iter().enumerate() {
                 let rect = D2D_RECT_F {
                     left: 40.0,
@@ -268,7 +268,7 @@ impl ModernSettingsWindow {
                 if self.is_in_rect(rect) {
                     self.is_focus_on_tabs = false;
                     self.focus_index = idx;
-                    self.handle_action_at(idx);
+                    self.handle_action_at(idx, settings);
                     return;
                 }
             }
@@ -284,7 +284,7 @@ impl ModernSettingsWindow {
                 if self.is_in_rect(rect) {
                     self.is_focus_on_tabs = false;
                     self.focus_index = idx;
-                    self.handle_action_at(idx);
+                    self.handle_action_at(idx, settings);
                     return;
                 }
             }
@@ -525,6 +525,16 @@ impl ModernSettingsWindow {
             30.0,
             settings.show_status_bar_info,
             focus_idx == Some(2),
+        );
+        self.draw_button(
+            "ルーペ倍率",
+            &format!("{:.1}x", settings.magnifier_zoom),
+            40.0,
+            330.0,
+            160.0,
+            30.0,
+            false,
+            focus_idx == Some(3),
         );
     }
 
@@ -812,6 +822,10 @@ impl ModernSettingsWindow {
                     "Prefetch (GPU)",
                     &format!("{} pages", settings.gpu_max_prefetch_pages),
                 ),
+                (
+                    "Magnifier Zoom",
+                    &format!("{:.1}x", settings.magnifier_zoom),
+                ),
                 ("OS", "Windows (x86_64)"),
                 ("Developed by", "Tatsumaki Ishino\nKID Project Team"),
             ];
@@ -930,13 +944,13 @@ impl ModernSettingsWindow {
 
     fn get_item_count(&self) -> usize {
         match self.selected_tab {
-            0 => 3, // 全般: 表示モード, 先頭単一, ステータスバー
+            0 => 4, // 全般: 表示モード, 先頭単一, ステータスバー, ルーペ倍率
             1 => 4, // レンダリング: エンジン, CPUサンプリング, GPUサンプリング, CPU色変換
             _ => 0,
         }
     }
 
-    fn handle_action_at(&self, index: usize) {
+    fn handle_action_at(&self, index: usize, settings: &Settings) {
         if self.selected_tab == 0 {
             match index {
                 0 => {
@@ -953,6 +967,16 @@ impl ModernSettingsWindow {
                     let _ = self
                         .event_proxy
                         .send_event(crate::image::loader::UserEvent::ToggleStatusBar);
+                }
+                3 => {
+                    let next_zoom = if settings.magnifier_zoom >= 5.0 {
+                        2.0
+                    } else {
+                        settings.magnifier_zoom + 0.5
+                    };
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::SetMagnifierZoom(next_zoom));
                 }
                 _ => {}
             }

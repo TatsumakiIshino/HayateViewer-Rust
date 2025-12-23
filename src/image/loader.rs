@@ -37,6 +37,7 @@ pub enum UserEvent {
     ToggleStatusBar,
     RotateRenderingBackend,
     RotateDisplayMode,
+    SetMagnifierZoom(f32),
 }
 
 pub struct AsyncLoader {

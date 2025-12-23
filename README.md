@@ -3,8 +3,6 @@
 Direct2D, D3D11, OpenGL などの多様な描画バックエンドを選択可能な、高速・軽量な画像・自炊コミックビューアです。
 Python版 HayateViewer のコンセプトを継承し、更なるパフォーマンスを追求して Rust で再構築されています。
 
-![Settings Screenshot](file:///C:/Users/Tatsumaki/.gemini/antigravity/brain/ce66b745-8a9e-4822-8053-62b75d676c0e/uploaded_image_1766270453034.png)
-
 ## 主な特徴
 
 - **マルチ・レンダリングエンジン**:

@@ -330,7 +330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Modern UI ウィンドウのイベント処理
                 if let Some(ref mut ms) = modern_settings {
                     if ms.window.id() == window_id {
-                        if ms.handle_event(&event) {
+                        if ms.handle_event(&event, &settings) {
                             modern_settings = None;
                         } else if matches!(event, WindowEvent::RedrawRequested) {
                             ms.draw(&settings);
@@ -668,7 +668,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 let window_size = window.inner_size();
                                 let win_size = (window_size.width as f32, window_size.height as f32);
-                                view_state.set_zoom(view_state.zoom_level * 2.0, view_state.cursor_pos, win_size);
+                                view_state.set_zoom(view_state.zoom_level * settings.magnifier_zoom, view_state.cursor_pos, win_size);
                             } else {
                                 if view_state.is_loupe {
                                     view_state.zoom_level = view_state.loupe_base_zoom;
@@ -1131,6 +1131,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     view_state.reset();
                     request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                     window.request_redraw();
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                }
+                UserEvent::SetMagnifierZoom(zoom) => {
+                    settings.magnifier_zoom = zoom;
+                    let _ = settings.save("config.json");
                     if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
                 }
             }
