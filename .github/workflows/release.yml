@@ -34,11 +34,31 @@ jobs:
           Compress-Archive -Path "target/release/hayate-viewer-rust.exe", "README.md", "CHANGELOG.md" -DestinationPath $fileName
           echo "ASSET_PATH=$fileName" >> $env:GITHUB_ENV
 
+      - name: Extract release notes
+        id: extract_notes
+        shell: pwsh
+        run: |
+          $changelog = Get-Content -Path CHANGELOG.md -Encoding UTF8
+          $found = $false
+          $notes = ""
+          foreach ($line in $changelog) {
+              if ($line -match '^## \[') {
+                  if ($found) { break }
+                  $found = $true
+                  continue
+              }
+              if ($found) {
+                  $notes += $line + "`n"
+              }
+          }
+          $notes | Out-File -FilePath release_notes.md -Encoding UTF8
+          echo "notes_file=release_notes.md" >> $env:GITHUB_OUTPUT
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ASSET_PATH }}
-          generate_release_notes: true
+          body_path: release_notes.md
           draft: false
           prerelease: false
         env:
