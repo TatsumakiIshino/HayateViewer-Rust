@@ -257,7 +257,7 @@ impl ModernSettingsWindow {
 
         // 全般タブ内のクリック判定
         if self.selected_tab == 0 {
-            let items = [210.0, 250.0, 290.0, 330.0];
+            let items = [210.0, 250.0, 290.0, 330.0, 370.0];
             for (idx, &top) in items.iter().enumerate() {
                 let rect = D2D_RECT_F {
                     left: 40.0,
