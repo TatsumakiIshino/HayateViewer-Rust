@@ -1,6 +1,7 @@
-use super::{InterpolationMode, Renderer, TextureHandle};
+use super::{InterpolationMode, PageDrawInfo, Renderer, TextureHandle};
 use crate::image::cache::DecodedImage;
 use crate::image::cache::PixelData;
+use crate::state::BindingDirection;
 use glow::*;
 use glutin::context::PossiblyCurrentContext;
 use glutin::surface::{GlSurface, Surface, WindowSurface};
@@ -782,5 +783,55 @@ impl Renderer for OpenGLRenderer {
     }
     fn set_text_alignment(&self, alignment: DWRITE_TEXT_ALIGNMENT) {
         self.text_alignment.store(alignment.0, Ordering::Relaxed);
+    }
+
+    fn supports_page_turn_animation(&self) -> bool {
+        true // OpenGLはページめくりアニメーションをサポート
+    }
+
+    fn draw_page_turn(
+        &self,
+        progress: f32,
+        direction: i32,
+        binding: BindingDirection,
+        from_pages: &[PageDrawInfo],
+        to_pages: &[PageDrawInfo],
+        dest_rect: &D2D_RECT_F,
+    ) {
+        // シンプルなスライドアニメーション
+        let width = dest_rect.right - dest_rect.left;
+        let eased = 1.0 - (1.0 - progress).powi(3); // ease-out cubic
+
+        let slide_direction = match (binding, direction) {
+            (BindingDirection::Right, 1) => 1.0,
+            (BindingDirection::Right, _) => -1.0,
+            (BindingDirection::Left, 1) => -1.0,
+            (BindingDirection::Left, _) => 1.0,
+        };
+
+        let offset = width * eased * slide_direction;
+
+        // 遷移前（スライドアウト）
+        for page in from_pages {
+            let mut page_rect = page.dest_rect;
+            page_rect.left += offset;
+            page_rect.right += offset;
+
+            if page_rect.right > 0.0 && page_rect.left < dest_rect.right + width {
+                self.draw_image(page.texture, &page_rect);
+            }
+        }
+
+        // 遷移後（スライドイン）
+        let to_offset = offset - width * slide_direction;
+        for page in to_pages {
+            let mut page_rect = page.dest_rect;
+            page_rect.left += to_offset;
+            page_rect.right += to_offset;
+
+            if page_rect.right > 0.0 && page_rect.left < dest_rect.right + width {
+                self.draw_image(page.texture, &page_rect);
+            }
+        }
     }
 }

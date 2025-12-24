@@ -57,6 +57,7 @@ pub fn select_archive_file(parent: HWND) -> Option<PathBuf> {
     }
 }
 
+#[allow(dead_code)]
 pub fn show_confirm_dialog(parent: HWND, title: &str, message: &str) -> bool {
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{

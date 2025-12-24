@@ -1,5 +1,6 @@
-use super::{InterpolationMode, Renderer, TextureHandle};
+use super::{InterpolationMode, PageDrawInfo, Renderer, TextureHandle};
 use crate::image::cache::{DecodedImage, PixelData};
+use crate::state::BindingDirection;
 use std::mem::ManuallyDrop;
 use windows::{
     Win32::Foundation::*, Win32::Graphics::Direct2D::Common::*, Win32::Graphics::Direct2D::*,
@@ -393,6 +394,62 @@ impl Renderer for D3D11Renderer {
             let _ = self
                 .text_format_large
                 .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+    }
+
+    fn supports_page_turn_animation(&self) -> bool {
+        true // D3D11はページめくりアニメーションをサポート
+    }
+
+    fn draw_page_turn(
+        &self,
+        progress: f32,
+        direction: i32,
+        binding: BindingDirection,
+        from_pages: &[PageDrawInfo],
+        to_pages: &[PageDrawInfo],
+        dest_rect: &D2D_RECT_F,
+    ) {
+        // シンプルなスライドアニメーション（後で3Dカール効果に拡張予定）
+        // progress: 0.0 = 遷移開始（from表示）、1.0 = 遷移完了（to表示）
+
+        let width = dest_rect.right - dest_rect.left;
+        let eased = 1.0 - (1.0 - progress).powi(3); // ease-out cubic
+
+        // スライド方向の決定
+        // ユーザーフィードバックに基づき符号を反転
+        let slide_direction = match (binding, direction) {
+            (BindingDirection::Right, 1) => 1.0,
+            (BindingDirection::Right, _) => -1.0,
+            (BindingDirection::Left, 1) => -1.0,
+            (BindingDirection::Left, _) => 1.0,
+        };
+
+        let offset = width * eased * slide_direction;
+
+        // 遷移前のページを描画（スライドアウト）
+        for page in from_pages {
+            let mut page_rect = page.dest_rect;
+            // X座標をオフセット分ずらす
+            page_rect.left += offset;
+            page_rect.right += offset;
+
+            // 画面外にスライドアウトしている場合でも描画（クリッピングはレンダラー側で処理）
+            if page_rect.right > 0.0 && page_rect.left < dest_rect.right + width {
+                self.draw_image(page.texture, &page_rect);
+            }
+        }
+
+        // 遷移後のページを描画（スライドイン）
+        let to_offset = offset - width * slide_direction;
+        for page in to_pages {
+            let mut page_rect = page.dest_rect;
+            page_rect.left += to_offset;
+            page_rect.right += to_offset;
+
+            if page_rect.right > 0.0 && page_rect.left < dest_rect.right + width {
+                self.draw_image(page.texture, &page_rect);
+            }
         }
     }
 }

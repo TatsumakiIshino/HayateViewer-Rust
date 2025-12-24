@@ -30,6 +30,10 @@ pub struct Settings {
     pub magnifier_zoom: f32,
     pub history: Vec<HistoryItem>,
     pub max_history_count: usize,
+    /// ページめくりアニメーションを有効にするか（D2Dレンダリング時は無効）
+    pub page_turn_animation_enabled: bool,
+    /// ページめくりアニメーションの速度（秒単位、0.1〜2.0）
+    pub page_turn_duration: f32,
 }
 
 impl Default for Settings {
@@ -54,6 +58,8 @@ impl Default for Settings {
             magnifier_zoom: 2.0,
             history: Vec::new(),
             max_history_count: 50,
+            page_turn_animation_enabled: true,
+            page_turn_duration: 0.5,
         }
     }
 }

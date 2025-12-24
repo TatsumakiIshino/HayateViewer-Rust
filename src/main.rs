@@ -8,12 +8,12 @@ mod ui;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use crate::config::Settings;
-use crate::render::Renderer;
+use crate::render::{Renderer, PageDrawInfo, TextureHandle};
 use crate::render::d2d::D2DRenderer;
 use crate::image::{get_image_source, ImageSource};
 use crate::image::cache::{create_shared_cache, SharedImageCache};
 use crate::image::loader::{AsyncLoader, LoaderRequest, UserEvent};
-use crate::state::{AppState, BindingDirection};
+use crate::state::{AppState, BindingDirection, PageTurnAnimation};
 use std::sync::Arc;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F, D2D_SIZE_F};
 use windows::Win32::Graphics::DirectWrite::{
@@ -600,7 +600,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let new_idx = (app_state.current_page_index as isize + direction as isize).clamp(0, (app_state.image_files.len() as isize - 1).max(0)) as usize;
                                 app_state.current_page_index = new_idx;
                             } else {
-                                app_state.navigate(direction);
+                                // アニメーション中は操作を無視
+                                if app_state.page_turn_animation.is_some() {
+                                    return;
+                                }
+
+                                if settings.page_turn_animation_enabled && renderer.supports_page_turn_animation() {
+                                    let from_pages = app_state.get_page_indices_to_display();
+                                    let current_idx = app_state.current_page_index;
+                                    
+                                    // 遷移後の状態をシミュレーション
+                                    app_state.navigate(direction);
+                                    let to_pages = app_state.get_page_indices_to_display();
+                                    let next_idx = app_state.current_page_index; // navigate後のインデックス
+                                    
+                                    if from_pages != to_pages {
+                                        // 状態を元に戻し、アニメーションを開始
+                                        app_state.current_page_index = current_idx;
+                                        
+                                        app_state.page_turn_animation = Some(PageTurnAnimation {
+                                            start_time: std::time::Instant::now(),
+                                            direction,
+                                            duration: settings.page_turn_duration,
+                                            from_pages: from_pages.clone(),
+                                            to_pages: to_pages.clone(),
+                                        });
+                                        
+                                        // 遷移先ページのプリフェッチ要求（一瞬だけインデックスを進めて戻す）
+                                        app_state.current_page_index = next_idx;
+                                        request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                                        app_state.current_page_index = current_idx;
+                                        
+                                        window.request_redraw();
+                                        return; // 通常の navigate/prefetch フローをスキップ
+                                    } else {
+                                        // ページが変わらない場合はそのまま維持（navigate は既に呼ばれている）
+                                    }
+                                } else {
+                                    app_state.navigate(direction);
+                                }
                             }
                             view_state.reset();
                             let l = loader.clone();
@@ -929,11 +967,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         window.request_redraw();
                     }
 
+                    // アニメーション完了チェック
+                    if let Some(anim) = &app_state.page_turn_animation {
+                        if anim.is_complete() {
+                             if let Some(&first_page) = anim.to_pages.first() {
+                                 app_state.current_page_index = first_page;
+                             }
+                             app_state.page_turn_animation = None;
+                             window.request_redraw();
+                        } else {
+                            window.request_redraw();
+                        }
+                    }
+
                     let window_size = window.inner_size();
                     let win_w = window_size.width as f32;
                     let win_h = window_size.height as f32;
 
-                    let indices = app_state.get_page_indices_to_display();
+                    let indices = if let Some(anim) = &app_state.page_turn_animation {
+                        let mut pages = anim.from_pages.clone();
+                        pages.extend(&anim.to_pages);
+                        pages.sort();
+                        pages.dedup();
+                        pages
+                    } else {
+                        app_state.get_page_indices_to_display()
+                    };
                     
                     // GPU キャッシュの更新と不要なビットマップの解放
                     {
@@ -999,91 +1058,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 描画
                     renderer.begin_draw();
                     
-                    let mut bitmaps_to_draw = Vec::new();
-                    for &idx in &indices {
-                        if let Some((_, bmp)) = current_bitmaps.iter().find(|(i, _)| *i == idx) {
-                            bitmaps_to_draw.push(bmp);
-                        }
-                    }
+                    if let Some(anim) = &app_state.page_turn_animation {
+                        // アニメーション用レイアウト計算
+                        let (from_layout, _) = calculate_page_layout(
+                            renderer.as_ref(),
+                            &anim.from_pages,
+                            &current_bitmaps,
+                            win_w,
+                            win_h,
+                            view_state.zoom_level,
+                            view_state.pan_offset
+                        );
+                        let (to_layout, _) = calculate_page_layout(
+                            renderer.as_ref(),
+                            &anim.to_pages,
+                            &current_bitmaps,
+                            win_w,
+                            win_h,
+                            view_state.zoom_level,
+                            view_state.pan_offset
+                        );
+                        
+                        let viewport_rect = D2D_RECT_F {
+                            left: 0.0,
+                            top: 0.0,
+                            right: win_w,
+                            bottom: win_h,
+                        };
+                        
+                        renderer.draw_page_turn(
+                            anim.progress(),
+                            anim.direction,
+                            app_state.binding_direction,
+                            &from_layout,
+                            &to_layout,
+                            &viewport_rect
+                        );
+                    } else {
+                        // 通常描画
+                        let display_indices = app_state.get_page_indices_to_display();
+                         let (mut layout_info, (content_w, content_h)) = calculate_page_layout(
+                            renderer.as_ref(),
+                            &display_indices,
+                            &current_bitmaps,
+                            win_w,
+                            win_h,
+                            view_state.zoom_level,
+                            view_state.pan_offset
+                        );
+                        
+                        // パン制限と位置修正
+                        let old_pan = view_state.pan_offset;
+                        view_state.clamp_pan_offset((win_w, win_h), (content_w, content_h));
+                        let new_pan = view_state.pan_offset;
+                         if old_pan != new_pan {
+                             let dx = new_pan.0 - old_pan.0;
+                             let dy = new_pan.1 - old_pan.1;
+                             for info in &mut layout_info {
+                                 info.dest_rect.left += dx;
+                                 info.dest_rect.right += dx;
+                                 info.dest_rect.top += dy;
+                                 info.dest_rect.bottom += dy;
+                             }
+                         }
 
-                    if !indices.is_empty() {
-                        {
-                            // 見開き表示で画像が1枚足りない場合でも、2枚分の枠を確保してレイアウトが崩れないようにする
-                            let mut images_info = Vec::new();
-                            let mut total_content_w = 0.0;
-                            let mut max_content_h = 0.0;
-                            
-                            for &idx in &indices {
-                                if let Some((_, bmp)) = current_bitmaps.iter().find(|(i, _)| *i == idx) {
-                                    let (w, h) = renderer.get_texture_size(bmp);
-                                    let size = D2D_SIZE_F { width: w, height: h };
-                                    images_info.push((idx, Some((bmp, size))));
-                                    total_content_w += w;
-                                    if h > max_content_h { max_content_h = h; }
-                                } else {
-                                    // 未ロードのページも枠を確保
-                                    images_info.push((idx, None));
-                                }
-                            }
-
-                            // 1枚もロードされていない場合は何もしない
-                            if max_content_h == 0.0 {
-                                // 仮の高さ（ウィンドウサイズなどから推測）
-                                max_content_h = win_h * 0.8;
-                            }
-                            
-                            // 未ロードの画像がある場合、total_content_w を調整
-                            if indices.len() == 2 && images_info.iter().any(|info| info.1.is_none()) {
-                                if let Some((_, Some((_, size)))) = images_info.iter().find(|info| info.1.is_some()) {
-                                    total_content_w = size.width * 2.0;
-                                } else {
-                                    total_content_w = win_w * 0.8;
-                                }
-                            }
-
-                            if total_content_w > 0.0 {
-                                let scale_fit = (win_w / total_content_w).min(win_h / max_content_h).min(1.0);
-                                let total_scale = scale_fit * view_state.zoom_level;
-
-                                let draw_total_w = total_content_w * total_scale;
-                                let draw_max_h = max_content_h * total_scale;
-
-                                view_state.clamp_pan_offset((win_w, win_h), (draw_total_w, draw_max_h));
-
-                                let base_x = (win_w - draw_total_w) / 2.0 + view_state.pan_offset.0;
-                                let base_y = (win_h - draw_max_h) / 2.0 + view_state.pan_offset.1;
-
-                                let mut current_x = base_x;
-                                for (_idx, info) in images_info {
-                                    // 見開きの場合、個々の画像幅を計算
-                                    let w_step = if indices.len() == 2 {
-                                        total_content_w / 2.0 * total_scale
-                                    } else {
-                                        total_content_w * total_scale
-                                    };
-
-                                    let y_center = base_y + draw_max_h / 2.0;
-
-                                    if let Some((bmp, size)) = info {
-                                        let w = size.width * total_scale;
-                                        let h = size.height * total_scale;
-                                        let y = y_center - h / 2.0;
-                                        // 画像を枠内で中央寄せ
-                                        let x = current_x + (w_step - w) / 2.0;
-
-                                        let dest_rect = D2D_RECT_F {
-                                            left: x,
-                                            top: y,
-                                            right: x + w,
-                                            bottom: y + h,
-                                        };
-                                        renderer.draw_image(bmp, &dest_rect);
-                                    } else {
-                                        // 未ロード時は何も描画しない
-                                    }
-                                    current_x += w_step;
-                                }
-                            }
+                        for info in layout_info {
+                            renderer.draw_image(info.texture, &info.dest_rect);
                         }
                     }
 
@@ -1635,4 +1675,91 @@ fn get_neighboring_source(current_path: &str, direction: isize) -> Option<String
     }
     
     None
+}
+
+fn calculate_page_layout<'a>(
+    renderer: &dyn Renderer,
+    indices: &[usize],
+    bitmaps: &'a [(usize, TextureHandle)],
+    win_w: f32,
+    win_h: f32,
+    zoom_level: f32,
+    pan_offset: (f32, f32),
+) -> (Vec<PageDrawInfo<'a>>, (f32, f32)) {
+    let mut images_info = Vec::new();
+    let mut total_content_w = 0.0;
+    let mut max_content_h = 0.0;
+    
+    for &idx in indices {
+        if let Some((_, bmp)) = bitmaps.iter().find(|(i, _)| *i == idx) {
+            let (w, h) = renderer.get_texture_size(bmp);
+            let size = D2D_SIZE_F { width: w, height: h };
+            images_info.push((idx, Some((bmp, size))));
+            total_content_w += w;
+            if h > max_content_h { max_content_h = h; }
+        } else {
+            // 未ロードのページも枠を確保（仮の動作）
+            images_info.push((idx, None));
+        }
+    }
+
+    if max_content_h == 0.0 {
+        max_content_h = win_h * 0.8;
+    }
+    
+    // 未ロードの画像がある場合、total_content_w を調整
+    if indices.len() == 2 && images_info.iter().any(|info| info.1.is_none()) {
+        if let Some((_, Some((_, size)))) = images_info.iter().find(|info| info.1.is_some()) {
+            total_content_w = size.width * 2.0;
+        } else {
+            total_content_w = win_w * 0.8;
+        }
+    }
+    if total_content_w == 0.0 {
+        return (Vec::new(), (0.0, 0.0));
+    }
+    
+    let scale_fit = (win_w / total_content_w).min(win_h / max_content_h).min(1.0);
+    let total_scale = scale_fit * zoom_level;
+
+    let draw_total_w = total_content_w * total_scale;
+    let draw_max_h = max_content_h * total_scale;
+
+    let base_x = (win_w - draw_total_w) / 2.0 + pan_offset.0;
+    let base_y = (win_h - draw_max_h) / 2.0 + pan_offset.1;
+
+    let mut current_x = base_x;
+    let mut result_infos = Vec::new();
+
+    for (_idx, info) in images_info {
+        let w_step = if indices.len() == 2 {
+            total_content_w / 2.0 * total_scale
+        } else {
+            total_content_w * total_scale
+        };
+
+        let y_center = base_y + draw_max_h / 2.0;
+
+        if let Some((bmp, size)) = info {
+            let w = size.width * total_scale;
+            let h = size.height * total_scale;
+            let y = y_center - h / 2.0;
+            // 画像を枠内で中央寄せ
+            let x = current_x + (w_step - w) / 2.0;
+
+            let dest_rect = D2D_RECT_F {
+                left: x,
+                top: y,
+                right: x + w,
+                bottom: y + h,
+            };
+            result_infos.push(PageDrawInfo {
+                texture: bmp,
+                dest_rect,
+            });
+        }
+        current_x += w_step;
+    }
+    
+    (result_infos, (draw_total_w, draw_max_h))
 }

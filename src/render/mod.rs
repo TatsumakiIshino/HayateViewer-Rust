@@ -1,4 +1,5 @@
 use crate::image::cache::DecodedImage;
+use crate::state::BindingDirection;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT;
 
@@ -6,7 +7,6 @@ pub mod d2d;
 pub mod d3d11;
 pub mod opengl;
 
-/// レンダラーバックエンドが共通で実装すべきトレイト
 /// レンダラーバックエンドが共通で実装すべきトレイト
 pub trait Renderer: Send + Sync {
     fn resize(&self, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>>;
@@ -33,6 +33,29 @@ pub trait Renderer: Send + Sync {
 
     fn set_interpolation_mode(&mut self, mode: InterpolationMode);
     fn set_text_alignment(&self, alignment: DWRITE_TEXT_ALIGNMENT);
+
+    /// ページめくりアニメーションをサポートするかどうか
+    fn supports_page_turn_animation(&self) -> bool {
+        false // デフォルトはサポートしない（D2D）
+    }
+
+    /// ページめくりアニメーションを描画
+    fn draw_page_turn(
+        &self,
+        _progress: f32,
+        _direction: i32,
+        _binding: BindingDirection,
+        _from_pages: &[PageDrawInfo],
+        _to_pages: &[PageDrawInfo],
+        _viewport_rect: &D2D_RECT_F,
+    ) {
+        // デフォルト実装は何もしない（D2Dなど非対応バックエンド用）
+    }
+}
+
+pub struct PageDrawInfo<'a> {
+    pub texture: &'a TextureHandle,
+    pub dest_rect: D2D_RECT_F,
 }
 
 /// バックエンドを跨いでテクスチャを管理するためのハンドル
