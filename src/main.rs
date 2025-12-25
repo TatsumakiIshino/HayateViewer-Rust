@@ -13,7 +13,7 @@ use crate::render::d2d::D2DRenderer;
 use crate::image::{get_image_source, ImageSource};
 use crate::image::cache::{create_shared_cache, SharedImageCache};
 use crate::image::loader::{AsyncLoader, LoaderRequest, UserEvent};
-use crate::state::{AppState, BindingDirection, PageTurnAnimation};
+use crate::state::{AppState, BindingDirection};
 use std::sync::Arc;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F, D2D_SIZE_F};
 use windows::Win32::Graphics::DirectWrite::{
@@ -600,45 +600,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let new_idx = (app_state.current_page_index as isize + direction as isize).clamp(0, (app_state.image_files.len() as isize - 1).max(0)) as usize;
                                 app_state.current_page_index = new_idx;
                             } else {
-                                // アニメーション中は操作を無視
-                                if app_state.page_turn_animation.is_some() {
-                                    return;
-                                }
-
-                                if settings.page_turn_animation_enabled && renderer.supports_page_turn_animation() {
-                                    let from_pages = app_state.get_page_indices_to_display();
-                                    let current_idx = app_state.current_page_index;
-                                    
-                                    // 遷移後の状態をシミュレーション
-                                    app_state.navigate(direction);
-                                    let to_pages = app_state.get_page_indices_to_display();
-                                    let next_idx = app_state.current_page_index; // navigate後のインデックス
-                                    
-                                    if from_pages != to_pages {
-                                        // 状態を元に戻し、アニメーションを開始
-                                        app_state.current_page_index = current_idx;
-                                        
-                                        app_state.page_turn_animation = Some(PageTurnAnimation {
-                                            start_time: std::time::Instant::now(),
-                                            direction,
-                                            duration: settings.page_turn_duration,
-                                            from_pages: from_pages.clone(),
-                                            to_pages: to_pages.clone(),
-                                        });
-                                        
-                                        // 遷移先ページのプリフェッチ要求（一瞬だけインデックスを進めて戻す）
-                                        app_state.current_page_index = next_idx;
-                                        request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
-                                        app_state.current_page_index = current_idx;
-                                        
-                                        window.request_redraw();
-                                        return; // 通常の navigate/prefetch フローをスキップ
-                                    } else {
-                                        // ページが変わらない場合はそのまま維持（navigate は既に呼ばれている）
-                                    }
-                                } else {
-                                    app_state.navigate(direction);
-                                }
+                                app_state.navigate(direction);
                             }
                             view_state.reset();
                             let l = loader.clone();
@@ -967,32 +929,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         window.request_redraw();
                     }
 
-                    // アニメーション完了チェック
-                    if let Some(anim) = &app_state.page_turn_animation {
-                        if anim.is_complete() {
-                             if let Some(&first_page) = anim.to_pages.first() {
-                                 app_state.current_page_index = first_page;
-                             }
-                             app_state.page_turn_animation = None;
-                             window.request_redraw();
-                        } else {
-                            window.request_redraw();
-                        }
-                    }
-
                     let window_size = window.inner_size();
                     let win_w = window_size.width as f32;
                     let win_h = window_size.height as f32;
 
-                    let indices = if let Some(anim) = &app_state.page_turn_animation {
-                        let mut pages = anim.from_pages.clone();
-                        pages.extend(&anim.to_pages);
-                        pages.sort();
-                        pages.dedup();
-                        pages
-                    } else {
-                        app_state.get_page_indices_to_display()
-                    };
+                    let indices = app_state.get_page_indices_to_display();
                     
                     // GPU キャッシュの更新と不要なビットマップの解放
                     {
@@ -1032,12 +973,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             // 残った candidates は解放対象
-                            // current_bitmaps = to_keep; // 既存コード
                             current_bitmaps = to_keep;
                         }
 
-                        // 2. 新しいビットマップの生成 (表示中 + 先読み範囲)
-                        // 表示中のページを最優先し、次に近い順にアップロードする
+                        // 2. 新しいビットマップーの生成 (表示中 + 先読み範囲)
                         let mut upload_candidates = gpu_targets.clone();
                         upload_candidates.sort_by_key(|&idx| (idx as isize - current_idx).abs());
 
@@ -1047,8 +986,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(decoded) = cache.get(&key) {
                                     if let Ok(texture) = renderer.upload_image(&decoded) {
                                         current_bitmaps.push((idx, texture));
-                                        // 1ループでのアップロード枚数を制限してカクつきを抑えることも可能だが、
-                                        // 現状は cache.get できたものはすべてアップロードする
                                     }
                                 }
                             }
@@ -1058,74 +995,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 描画
                     renderer.begin_draw();
                     
-                    if let Some(anim) = &app_state.page_turn_animation {
-                        // アニメーション用レイアウト計算
-                        let (from_layout, _) = calculate_page_layout(
-                            renderer.as_ref(),
-                            &anim.from_pages,
-                            &current_bitmaps,
-                            win_w,
-                            win_h,
-                            view_state.zoom_level,
-                            view_state.pan_offset
-                        );
-                        let (to_layout, _) = calculate_page_layout(
-                            renderer.as_ref(),
-                            &anim.to_pages,
-                            &current_bitmaps,
-                            win_w,
-                            win_h,
-                            view_state.zoom_level,
-                            view_state.pan_offset
-                        );
-                        
-                        let viewport_rect = D2D_RECT_F {
-                            left: 0.0,
-                            top: 0.0,
-                            right: win_w,
-                            bottom: win_h,
-                        };
-                        
-                        renderer.draw_page_turn(
-                            anim.progress(),
-                            anim.direction,
-                            app_state.binding_direction,
-                            &from_layout,
-                            &to_layout,
-                            &viewport_rect,
-                            &settings.page_turn_animation_type
-                        );
-                    } else {
-                        // 通常描画
-                        let display_indices = app_state.get_page_indices_to_display();
-                         let (mut layout_info, (content_w, content_h)) = calculate_page_layout(
-                            renderer.as_ref(),
-                            &display_indices,
-                            &current_bitmaps,
-                            win_w,
-                            win_h,
-                            view_state.zoom_level,
-                            view_state.pan_offset
-                        );
-                        
-                        // パン制限と位置修正
-                        let old_pan = view_state.pan_offset;
-                        view_state.clamp_pan_offset((win_w, win_h), (content_w, content_h));
-                        let new_pan = view_state.pan_offset;
-                         if old_pan != new_pan {
-                             let dx = new_pan.0 - old_pan.0;
-                             let dy = new_pan.1 - old_pan.1;
-                             for info in &mut layout_info {
-                                 info.dest_rect.left += dx;
-                                 info.dest_rect.right += dx;
-                                 info.dest_rect.top += dy;
-                                 info.dest_rect.bottom += dy;
-                             }
+                    // 通常描画
+                    let display_indices = app_state.get_page_indices_to_display();
+                    let (mut layout_info, (content_w, content_h)) = calculate_page_layout(
+                        renderer.as_ref(),
+                        &display_indices,
+                        &current_bitmaps,
+                        win_w,
+                        win_h,
+                        view_state.zoom_level,
+                        view_state.pan_offset
+                    );
+                    
+                    // パン制限と位置修正
+                    let old_pan = view_state.pan_offset;
+                    view_state.clamp_pan_offset((win_w, win_h), (content_w, content_h));
+                    let new_pan = view_state.pan_offset;
+                     if old_pan != new_pan {
+                         let dx = new_pan.0 - old_pan.0;
+                         let dy = new_pan.1 - old_pan.1;
+                         for info in &mut layout_info {
+                             info.dest_rect.left += dx;
+                             info.dest_rect.right += dx;
+                             info.dest_rect.top += dy;
+                             info.dest_rect.bottom += dy;
                          }
+                     }
 
-                        for info in layout_info {
-                            renderer.draw_image(info.texture, &info.dest_rect);
-                        }
+                    for info in layout_info {
+                        renderer.draw_image(info.texture, &info.dest_rect);
                     }
 
                     // ステータスバーの更新（Windows システムステータスバーを使用）
@@ -1470,30 +1368,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 UserEvent::SetMaxHistoryCount(count) => {
                     settings.max_history_count = count;
                     let _ = settings.save("config.json");
-                }
-                UserEvent::TogglePageTurnAnimation => {
-                    settings.page_turn_animation_enabled = !settings.page_turn_animation_enabled;
-                    let _ = settings.save("config.json");
-                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
-                }
-                UserEvent::ChangePageTurnDuration => {
-                    let duration = settings.page_turn_duration;
-                    settings.page_turn_duration = if duration < 0.2 { 0.3 }
-                        else if duration < 0.4 { 0.5 }
-                        else if duration < 0.7 { 0.8 }
-                        else if duration < 0.9 { 1.0 }
-                        else { 0.1 };
-                    let _ = settings.save("config.json");
-                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
-                }
-                UserEvent::RotatePageTurnAnimationType => {
-                     settings.page_turn_animation_type = if settings.page_turn_animation_type == "slide" {
-                         "curl".to_string()
-                     } else {
-                         "slide".to_string()
-                     };
-                     let _ = settings.save("config.json");
-                     if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
                 }
             }
         },

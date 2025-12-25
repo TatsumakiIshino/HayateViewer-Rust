@@ -13,36 +13,6 @@ pub struct AppState {
     pub current_history_index: Option<usize>,
     /// ステータスバーに表示する一時メッセージ ((メッセージ, 表示開始時刻))
     pub status_message: Option<(String, std::time::Instant)>,
-    /// ページめくりアニメーションの状態
-    pub page_turn_animation: Option<PageTurnAnimation>,
-}
-
-/// ページめくりアニメーションの状態
-#[derive(Debug, Clone)]
-pub struct PageTurnAnimation {
-    /// アニメーション開始時刻
-    pub start_time: std::time::Instant,
-    /// アニメーションの方向 (1: 前進, -1: 後退)
-    pub direction: i32,
-    /// アニメーションの持続時間（秒）
-    pub duration: f32,
-    /// 遷移前のページインデックス
-    pub from_pages: Vec<usize>,
-    /// 遷移後のページインデックス
-    pub to_pages: Vec<usize>,
-}
-
-impl PageTurnAnimation {
-    /// アニメーションの進行度を取得 (0.0〜1.0)
-    pub fn progress(&self) -> f32 {
-        let elapsed = self.start_time.elapsed().as_secs_f32();
-        (elapsed / self.duration).min(1.0)
-    }
-
-    /// アニメーションが完了したかどうか
-    pub fn is_complete(&self) -> bool {
-        self.progress() >= 1.0
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +36,6 @@ impl AppState {
             is_dragging_seekbar: false,
             current_history_index: None,
             status_message: None,
-            page_turn_animation: None,
         }
     }
 

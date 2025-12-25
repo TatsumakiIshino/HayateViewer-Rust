@@ -728,45 +728,6 @@ impl ModernSettingsWindow {
             settings.use_cpu_color_conversion,
             focus_idx == Some(3),
         );
-        self.draw_button(
-            "アニメーション",
-            if settings.page_turn_animation_enabled {
-                "有効"
-            } else {
-                "無効"
-            },
-            40.0,
-            370.0,
-            160.0,
-            30.0,
-            settings.page_turn_animation_enabled,
-            focus_idx == Some(4),
-        );
-        self.draw_button(
-            "アニメーション速度",
-            &format!("{:.1}秒", settings.page_turn_duration),
-            40.0,
-            410.0,
-            160.0,
-            30.0,
-            false,
-            focus_idx == Some(5),
-        );
-        let anim_type_text = match settings.page_turn_animation_type.as_str() {
-            "slide" => "スライド",
-            "curl" => "ページカール (D3D11)",
-            _ => &settings.page_turn_animation_type,
-        };
-        self.draw_button(
-            "アニメーション種類",
-            anim_type_text,
-            40.0,
-            450.0,
-            160.0,
-            30.0,
-            false,
-            focus_idx == Some(6),
-        );
     }
 
     fn draw_about_tab(&self, settings: &Settings) {
@@ -994,7 +955,7 @@ impl ModernSettingsWindow {
     fn get_item_count(&self) -> usize {
         match self.selected_tab {
             0 => 5, // 全般: 表示モード, 先頭単一, ステータスバー, ルーペ倍率, 履歴件数
-            1 => 7, // レンダリング: エンジン, CPUサンプリング, GPUサンプリング, CPU色変換, アニメ有効, アニメ時間, アニメ種類
+            1 => 4, // レンダリング: エンジン, CPUサンプリング, GPUサンプリング, CPU色変換
             _ => 0,
         }
     }
@@ -1060,21 +1021,6 @@ impl ModernSettingsWindow {
                     let _ = self
                         .event_proxy
                         .send_event(crate::image::loader::UserEvent::ToggleCpuColorConversion);
-                }
-                4 => {
-                    let _ = self
-                        .event_proxy
-                        .send_event(crate::image::loader::UserEvent::TogglePageTurnAnimation);
-                }
-                5 => {
-                    let _ = self
-                        .event_proxy
-                        .send_event(crate::image::loader::UserEvent::ChangePageTurnDuration);
-                }
-                6 => {
-                    let _ = self
-                        .event_proxy
-                        .send_event(crate::image::loader::UserEvent::RotatePageTurnAnimationType);
                 }
                 _ => {}
             }

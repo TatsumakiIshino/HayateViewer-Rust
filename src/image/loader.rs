@@ -43,9 +43,6 @@ pub enum UserEvent {
     ClearHistory,
     DeleteHistoryItem(usize),
     SetMaxHistoryCount(usize),
-    TogglePageTurnAnimation,
-    ChangePageTurnDuration,
-    RotatePageTurnAnimationType,
 }
 
 pub struct AsyncLoader {

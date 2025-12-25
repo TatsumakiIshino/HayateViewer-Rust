@@ -1,5 +1,4 @@
 use crate::image::cache::DecodedImage;
-use crate::state::BindingDirection;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT;
 
@@ -33,27 +32,9 @@ pub trait Renderer: Send + Sync {
 
     fn set_interpolation_mode(&mut self, mode: InterpolationMode);
     fn set_text_alignment(&self, alignment: DWRITE_TEXT_ALIGNMENT);
-
-    /// ページめくりアニメーションをサポートするかどうか
-    fn supports_page_turn_animation(&self) -> bool {
-        false // デフォルトはサポートしない（D2D）
-    }
-
-    /// ページめくりアニメーションを描画
-    fn draw_page_turn(
-        &self,
-        _progress: f32,
-        _direction: i32,
-        _binding: BindingDirection,
-        _from_pages: &[PageDrawInfo],
-        _to_pages: &[PageDrawInfo],
-        _viewport_rect: &D2D_RECT_F,
-        _animation_type: &str,
-    ) {
-        // デフォルト実装は何もしない（D2Dなど非対応バックエンド用）
-    }
 }
 
+#[derive(Clone)]
 pub struct PageDrawInfo<'a> {
     pub texture: &'a TextureHandle,
     pub dest_rect: D2D_RECT_F,
@@ -61,6 +42,7 @@ pub struct PageDrawInfo<'a> {
 
 /// バックエンドを跨いでテクスチャを管理するためのハンドル
 /// 具体的なオブジェクトはバックエンド側で保持され、IDや列挙型で管理される
+#[derive(Clone)]
 pub enum TextureHandle {
     Direct2D(windows::Win32::Graphics::Direct2D::ID2D1Bitmap1),
     #[allow(dead_code)]
