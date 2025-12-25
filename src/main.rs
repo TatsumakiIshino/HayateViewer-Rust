@@ -1232,23 +1232,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     window.request_redraw();
                     if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
                 }
-                UserEvent::RotateResamplingCpu => {
+                UserEvent::RotateResamplingCpu(dir) => {
                     let modes = ["PIL_LANCZOS", "PIL_BILINEAR", "PIL_BICUBIC", "PIL_NEAREST"];
                     let current = settings.resampling_mode_cpu.as_str();
                     let idx = modes.iter().position(|&m| m == current).unwrap_or(0);
-                    settings.resampling_mode_cpu = modes[(idx + 1) % modes.len()].to_string();
+                    let len = modes.len() as isize;
+                    let new_idx = ((idx as isize + dir) % len + len) % len;
+                    settings.resampling_mode_cpu = modes[new_idx as usize].to_string();
                     let _ = settings.save("config.json");
                     view_state.reset();
                     window.request_redraw();
-                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                    if let Some(ref mut ms) = modern_settings {
+                        ms.window.request_redraw();
+                    }
                 }
-                UserEvent::RotateResamplingGpu => {
+                UserEvent::RotateResamplingGpu(dir) => {
                     let modes = ["Nearest", "Linear", "Cubic", "Lanczos"];
                     let current = settings.resampling_mode_gpu.as_str();
                     let idx = modes.iter().position(|&m| m == current).unwrap_or(0);
-                    let new_mode = modes[(idx + 1) % modes.len()];
+                    let len = modes.len() as isize;
+                    let new_idx = ((idx as isize + dir) % len + len) % len;
+                    let new_mode = modes[new_idx as usize];
                     settings.resampling_mode_gpu = new_mode.to_string();
-                    
+
                     // レンダラーに即時反映
                     let mode_enum = match new_mode {
                         "Nearest" => crate::render::InterpolationMode::NearestNeighbor,
@@ -1272,32 +1278,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     window.request_redraw();
                     if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
                 }
-                UserEvent::RotateRenderingBackend => {
+                UserEvent::RotateRenderingBackend(dir) => {
                     let backends = ["direct2d", "direct3d11", "opengl"];
                     let current = settings.rendering_backend.as_str();
                     let idx = backends.iter().position(|&b| b == current).unwrap_or(0);
-                    settings.rendering_backend = backends[(idx + 1) % backends.len()].to_string();
+                    let len = backends.len() as isize;
+                    let new_idx = ((idx as isize + dir) % len + len) % len;
+                    settings.rendering_backend = backends[new_idx as usize].to_string();
                     let _ = settings.save("config.json");
-                    println!("[設定] レンダリングバックエンドを {} に変更しました。反映には再起動が必要です。", settings.rendering_backend);
-                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
-                }
-                UserEvent::RotateDisplayMode => {
-                    // 順序: 単一(false, any) -> 左(true, "left") -> 右(true, "right")
-                    if !settings.is_spread_view {
-                        settings.is_spread_view = true;
-                        settings.binding_direction = "left".to_string();
-                    } else if settings.binding_direction == "left" {
-                        settings.binding_direction = "right".to_string();
-                    } else {
-                        settings.is_spread_view = false;
+                    println!(
+                        "[設定] レンダリングバックエンドを {} に変更しました。反映には再起動が必要です。",
+                        settings.rendering_backend
+                    );
+                    if let Some(ref mut ms) = modern_settings {
+                        ms.window.request_redraw();
                     }
+                }
+                UserEvent::RotateDisplayMode(dir) => {
+                    // 順序: 0:単一(false, any), 1:左(true, "left"), 2:右(true, "right")
+                    let mut current_mode_idx = if !settings.is_spread_view {
+                        0
+                    } else if settings.binding_direction == "left" {
+                        1
+                    } else {
+                        2
+                    };
+
+                    let len = 3isize;
+                    current_mode_idx = ((current_mode_idx as isize + dir) % len + len) % len;
+
+                    match current_mode_idx {
+                        0 => {
+                            settings.is_spread_view = false;
+                        }
+                        1 => {
+                            settings.is_spread_view = true;
+                            settings.binding_direction = "left".to_string();
+                        }
+                        2 => {
+                            settings.is_spread_view = true;
+                            settings.binding_direction = "right".to_string();
+                        }
+                        _ => {}
+                    }
+
                     app_state.is_spread_view = settings.is_spread_view;
-                    app_state.binding_direction = if settings.binding_direction == "right" { BindingDirection::Right } else { BindingDirection::Left };
+                    app_state.binding_direction = if settings.binding_direction == "right" {
+                        BindingDirection::Right
+                    } else {
+                        BindingDirection::Left
+                    };
                     let _ = settings.save("config.json");
                     view_state.reset();
-                    request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                    request_pages_with_prefetch(
+                        &app_state,
+                        &loader,
+                        &rt,
+                        &cpu_cache,
+                        &settings,
+                        &current_path_key,
+                    );
                     window.request_redraw();
-                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                    if let Some(ref mut ms) = modern_settings {
+                        ms.window.request_redraw();
+                    }
                 }
                 UserEvent::SetMagnifierZoom(zoom) => {
                     settings.magnifier_zoom = zoom;

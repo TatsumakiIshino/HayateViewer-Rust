@@ -172,14 +172,14 @@ impl ModernSettingsWindow {
                             if self.is_focus_on_tabs {
                                 self.selected_tab = (self.selected_tab + 2) % 3;
                             } else {
-                                self.handle_action_at(self.focus_index, settings);
+                                self.handle_action_at(self.focus_index, settings, -1);
                             }
                         }
                         Key::Named(NamedKey::ArrowRight) => {
                             if self.is_focus_on_tabs {
                                 self.selected_tab = (self.selected_tab + 1) % 3;
                             } else {
-                                self.handle_action_at(self.focus_index, settings);
+                                self.handle_action_at(self.focus_index, settings, 1);
                             }
                         }
                         Key::Named(NamedKey::ArrowDown) => {
@@ -204,7 +204,7 @@ impl ModernSettingsWindow {
                         }
                         Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
                             if !self.is_focus_on_tabs {
-                                self.handle_action_at(self.focus_index, settings);
+                                self.handle_action_at(self.focus_index, settings, 1);
                             }
                         }
                         Key::Named(NamedKey::Tab) => {
@@ -268,7 +268,7 @@ impl ModernSettingsWindow {
                 if self.is_in_rect(rect) {
                     self.is_focus_on_tabs = false;
                     self.focus_index = idx;
-                    self.handle_action_at(idx, settings);
+                    self.handle_action_at(idx, settings, 1);
                     return;
                 }
             }
@@ -284,7 +284,7 @@ impl ModernSettingsWindow {
                 if self.is_in_rect(rect) {
                     self.is_focus_on_tabs = false;
                     self.focus_index = idx;
-                    self.handle_action_at(idx, settings);
+                    self.handle_action_at(idx, settings, 1);
                     return;
                 }
             }
@@ -960,13 +960,13 @@ impl ModernSettingsWindow {
         }
     }
 
-    fn handle_action_at(&self, index: usize, settings: &Settings) {
+    fn handle_action_at(&self, index: usize, settings: &Settings, direction: isize) {
         if self.selected_tab == 0 {
             match index {
                 0 => {
-                    let _ = self
-                        .event_proxy
-                        .send_event(crate::image::loader::UserEvent::RotateDisplayMode);
+                    let _ = self.event_proxy.send_event(
+                        crate::image::loader::UserEvent::RotateDisplayMode(direction),
+                    );
                 }
                 1 => {
                     let _ = self
@@ -979,43 +979,45 @@ impl ModernSettingsWindow {
                         .send_event(crate::image::loader::UserEvent::ToggleStatusBar);
                 }
                 3 => {
-                    let next_zoom = if settings.magnifier_zoom >= 5.0 {
-                        2.0
+                    let mut zoom = settings.magnifier_zoom;
+                    if direction > 0 {
+                        zoom = if zoom >= 5.0 { 2.0 } else { zoom + 0.5 };
                     } else {
-                        settings.magnifier_zoom + 0.5
-                    };
+                        zoom = if zoom <= 2.0 { 5.0 } else { zoom - 0.5 };
+                    }
                     let _ = self
                         .event_proxy
-                        .send_event(crate::image::loader::UserEvent::SetMagnifierZoom(next_zoom));
+                        .send_event(crate::image::loader::UserEvent::SetMagnifierZoom(zoom));
                 }
                 4 => {
-                    let next_count = if settings.max_history_count >= 50 {
-                        10
+                    let mut count = settings.max_history_count;
+                    if direction > 0 {
+                        count = if count >= 50 { 10 } else { count + 10 };
                     } else {
-                        settings.max_history_count + 10
-                    };
-                    let _ = self.event_proxy.send_event(
-                        crate::image::loader::UserEvent::SetMaxHistoryCount(next_count),
-                    );
+                        count = if count <= 10 { 50 } else { count - 10 };
+                    }
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::SetMaxHistoryCount(count));
                 }
                 _ => {}
             }
         } else if self.selected_tab == 1 {
             match index {
                 0 => {
-                    let _ = self
-                        .event_proxy
-                        .send_event(crate::image::loader::UserEvent::RotateRenderingBackend);
+                    let _ = self.event_proxy.send_event(
+                        crate::image::loader::UserEvent::RotateRenderingBackend(direction),
+                    );
                 }
                 1 => {
-                    let _ = self
-                        .event_proxy
-                        .send_event(crate::image::loader::UserEvent::RotateResamplingCpu);
+                    let _ = self.event_proxy.send_event(
+                        crate::image::loader::UserEvent::RotateResamplingCpu(direction),
+                    );
                 }
                 2 => {
-                    let _ = self
-                        .event_proxy
-                        .send_event(crate::image::loader::UserEvent::RotateResamplingGpu);
+                    let _ = self.event_proxy.send_event(
+                        crate::image::loader::UserEvent::RotateResamplingGpu(direction),
+                    );
                 }
                 3 => {
                     let _ = self
