@@ -1,10 +1,10 @@
 use super::{InterpolationMode, PageDrawInfo, Renderer, TextureHandle};
 use crate::image::cache::{DecodedImage, PixelData};
 use crate::state::BindingDirection;
-use std::mem::ManuallyDrop;
+
 use windows::{
-    Win32::Foundation::*, Win32::Graphics::Direct2D::Common::*, Win32::Graphics::Direct2D::*,
-    Win32::Graphics::Direct3D::*, Win32::Graphics::Direct3D11::*, Win32::Graphics::DirectWrite::*,
+    Win32::Foundation::*, Win32::Graphics::Direct2D::Common::*, Win32::Graphics::Direct3D::*,
+    Win32::Graphics::Direct3D11::*, Win32::Graphics::DirectWrite::*,
     Win32::Graphics::Dxgi::Common::*, Win32::Graphics::Dxgi::*, core::*,
 };
 
@@ -14,26 +14,29 @@ pub struct D3D11Renderer {
     #[allow(dead_code)]
     pub context: ID3D11DeviceContext,
     pub swap_chain: IDXGISwapChain1,
-    // D2D Interop
-    pub d2d_context: ID2D1DeviceContext,
-    pub brush: ID2D1SolidColorBrush,
-    #[allow(dead_code)]
-    pub dw_factory: IDWriteFactory,
-    pub text_format: IDWriteTextFormat,
-    pub text_format_large: IDWriteTextFormat,
-    pub interpolation_mode: D2D1_INTERPOLATION_MODE,
-    pub shader_interpolation_mode: i32, // 0=Nearest, 1=Linear, 2=Cubic, 3=Lanczos
 
     // D3D11 Resources
+    render_target_view: ID3D11RenderTargetView,
     vertex_shader: ID3D11VertexShader,
     input_layout: ID3D11InputLayout,
-    _pixel_shader_rgba: ID3D11PixelShader,
+    pixel_shader_rgba: ID3D11PixelShader,
     pixel_shader_ycbcr: ID3D11PixelShader,
     vertex_buffer: ID3D11Buffer,
     constant_buffer: ID3D11Buffer,
     sampler_linear: ID3D11SamplerState,
     sampler_nearest: ID3D11SamplerState,
     rasterizer_state: ID3D11RasterizerState,
+
+    // Page Curl Resources
+    page_curl_vs: ID3D11VertexShader,
+    page_curl_cb: ID3D11Buffer,
+    curl_vertex_buffer: ID3D11Buffer,
+    curl_index_buffer: ID3D11Buffer,
+    curl_index_count: u32,
+
+    // Settings
+    pub interpolation_mode: InterpolationMode,
+    pub text_alignment: std::sync::atomic::AtomicI32, // GDI 用
 }
 
 use windows::Win32::Graphics::Direct3D::Fxc::*;
@@ -51,6 +54,17 @@ struct YCbCrConstants {
     scale: [f32; 4],
     interpolation_mode: i32,
     _padding: [i32; 3], // 16バイトアライメント用パディング
+}
+
+#[repr(C)]
+struct PageCurlConstants {
+    progress: f32,
+    direction: f32,
+    viewport_width: f32,
+    viewport_height: f32,
+    dest_rect: [f32; 4],
+    layer: f32,
+    _padding: [f32; 3],
 }
 
 fn compile_shader(source: &[u8], entry_point: &str, target: &str) -> Result<ID3DBlob> {
@@ -94,46 +108,40 @@ fn compile_shader(source: &[u8], entry_point: &str, target: &str) -> Result<ID3D
 impl Renderer for D3D11Renderer {
     fn resize(
         &self,
-        width: u32,
-        height: u32,
+        _width: u32,
+        _height: u32,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        unsafe {
-            // D2D ターゲットを解放
-            self.d2d_context.SetTarget(None);
-
-            self.swap_chain.ResizeBuffers(
-                0,
-                width,
-                height,
-                DXGI_FORMAT_UNKNOWN,
-                DXGI_SWAP_CHAIN_FLAG(0),
-            )?;
-
-            // D2D ターゲットの再作成
-            let surface: IDXGISurface = self.swap_chain.GetBuffer(0)?;
-            let d2d_bitmap = self
-                .d2d_context
-                .CreateBitmapFromDxgiSurface(&surface, None)?;
-            self.d2d_context.SetTarget(&d2d_bitmap);
-        }
+        // スワップチェーンの自動スケーリング (DXGI_SCALING_STRETCH) に任せるため何もしない
         Ok(())
     }
 
     fn begin_draw(&self) {
         unsafe {
-            self.d2d_context.BeginDraw();
-            self.d2d_context.Clear(Some(&D2D1_COLOR_F {
-                r: 0.1,
-                g: 0.1,
-                b: 0.1,
-                a: 0.8,
-            }));
+            let rtv = self.render_target_view.clone();
+            // 背景色 (ダークグレー)
+            let clear_color = [0.1, 0.1, 0.1, 1.0];
+            self.context.ClearRenderTargetView(&rtv, &clear_color);
+
+            // ビューポートをバックバッファ全体に設定
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            let back_buffer: ID3D11Texture2D = self.swap_chain.GetBuffer(0).unwrap();
+            back_buffer.GetDesc(&mut desc);
+
+            let viewport = D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: desc.Width as f32,
+                Height: desc.Height as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            };
+            self.context.RSSetViewports(Some(&[viewport]));
         }
     }
 
     fn end_draw(&self) -> std::result::Result<(), Box<dyn std::error::Error>> {
         unsafe {
-            self.d2d_context.EndDraw(None, None)?;
+            // VSync ON で待機
             self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
         }
         Ok(())
@@ -145,11 +153,8 @@ impl Renderer for D3D11Renderer {
     ) -> std::result::Result<TextureHandle, Box<dyn std::error::Error>> {
         match &image.pixel_data {
             PixelData::Rgba8(data) => {
-                // D2D ビットマップとして作成（既存の D2D Interop を活用）
-                let bitmap: ID2D1Bitmap1 = self
-                    .create_d2d_bitmap(image.width, image.height, data)
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-                Ok(TextureHandle::Direct2D(bitmap))
+                let srv = self.create_rgba_texture(image.width, image.height, data)?;
+                Ok(TextureHandle::D3D11Rgba(srv))
             }
             PixelData::Ycbcr {
                 planes,
@@ -186,110 +191,93 @@ impl Renderer for D3D11Renderer {
     }
 
     fn draw_image(&self, texture: &TextureHandle, dest_rect: &D2D_RECT_F) {
-        match texture {
-            TextureHandle::Direct2D(bitmap) => unsafe {
-                self.d2d_context.DrawBitmap(
-                    bitmap,
-                    Some(dest_rect),
-                    1.0,
-                    self.interpolation_mode,
-                    None,
-                    None,
-                );
-            },
-            TextureHandle::D3D11YCbCr {
-                y,
-                cb,
-                cr,
-                width: _,
-                height: _,
-                _subsampling: _,
-                _precision: precision,
-                y_is_signed,
-                c_is_signed,
-            } => {
-                unsafe {
-                    // D2D の描画コンテキストを一時的に閉じる
-                    self.d2d_context.EndDraw(None, None).unwrap();
+        unsafe {
+            // ビューポートを描画領域に合わせて設定
+            let viewport = D3D11_VIEWPORT {
+                TopLeftX: dest_rect.left,
+                TopLeftY: dest_rect.top,
+                Width: dest_rect.right - dest_rect.left,
+                Height: dest_rect.bottom - dest_rect.top,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            };
+            self.context.RSSetViewports(Some(&[viewport]));
+            self.context.RSSetState(&self.rasterizer_state);
 
-                    let viewport = D3D11_VIEWPORT {
-                        TopLeftX: dest_rect.left,
-                        TopLeftY: dest_rect.top,
-                        Width: dest_rect.right - dest_rect.left,
-                        Height: dest_rect.bottom - dest_rect.top,
-                        MinDepth: 0.0,
-                        MaxDepth: 1.0,
-                    };
-                    self.context.RSSetViewports(Some(&[viewport]));
-                    self.context.RSSetState(&self.rasterizer_state);
+            // レンダーターゲット設定
+            let rtv = [Some(self.render_target_view.clone())];
+            self.context.OMSetRenderTargets(Some(&rtv), None);
 
-                    // Create RTV
-                    let back_buffer: ID3D11Texture2D = self.swap_chain.GetBuffer(0).unwrap();
-                    let mut rtv: Option<ID3D11RenderTargetView> = None;
-                    self.device
-                        .CreateRenderTargetView(&back_buffer, None, Some(&mut rtv))
-                        .unwrap();
+            // シェーダー設定
+            self.context.VSSetShader(&self.vertex_shader, None);
 
-                    let targets = [rtv];
-                    self.context.OMSetRenderTargets(Some(&targets), None);
+            // Input Layout
+            self.context.IASetInputLayout(&self.input_layout);
+            self.context
+                .IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 
-                    // Shaders
-                    self.context.VSSetShader(&self.vertex_shader, None);
+            // Vertex Buffer
+            let stride = std::mem::size_of::<Vertex>() as u32;
+            let offset = 0;
+            let buffers = [Some(self.vertex_buffer.clone())];
+            self.context.IASetVertexBuffers(
+                0,
+                1,
+                Some(buffers.as_ptr()),
+                Some(&stride),
+                Some(&offset),
+            );
+
+            // Sampler
+            let sampler = match self.interpolation_mode {
+                InterpolationMode::NearestNeighbor => &self.sampler_nearest,
+                _ => &self.sampler_linear,
+            };
+            self.context
+                .PSSetSamplers(0, Some(&[Some(sampler.clone())]));
+
+            match texture {
+                TextureHandle::D3D11Rgba(srv) => {
+                    self.context.PSSetShader(&self.pixel_shader_rgba, None);
+                    self.context
+                        .PSSetShaderResources(0, Some(&[Some(srv.clone())]));
+                    self.context.Draw(4, 0);
+                }
+                TextureHandle::D3D11YCbCr {
+                    y,
+                    cb,
+                    cr,
+                    _precision: precision,
+                    y_is_signed,
+                    c_is_signed,
+                    ..
+                } => {
                     self.context.PSSetShader(&self.pixel_shader_ycbcr, None);
 
-                    // Input Layout
-                    self.context.IASetInputLayout(&self.input_layout);
-                    self.context
-                        .IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-
-                    // Resources
-                    let stride = std::mem::size_of::<Vertex>() as u32;
-                    let offset = 0;
-                    let buffers = [Some(self.vertex_buffer.clone())];
-                    self.context.IASetVertexBuffers(
-                        0,
-                        1,
-                        Some(buffers.as_ptr()),
-                        Some(&stride),
-                        Some(&offset),
-                    );
-
-                    // Cb/Cr Swap 解除: 元の順序に戻す
                     let views = [Some(y.clone()), Some(cb.clone()), Some(cr.clone())];
                     self.context.PSSetShaderResources(0, Some(&views));
 
-                    let sampler = match self.interpolation_mode {
-                        D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR => &self.sampler_nearest,
-                        _ => &self.sampler_linear,
-                    };
-                    let samplers = [Some(sampler.clone())];
-                    self.context.PSSetSamplers(0, Some(&samplers));
-
-                    // Constants Update
-                    // Scale: input(255) -> 1.0 に正規化
+                    // Constants
                     let max_val = ((1u32 << precision) - 1) as f32;
                     let scale_val = 1.0 / max_val;
-
-                    // OpenJPEG のデータ形式に合わせたオフセット
-                    // Unsigned (0..2^n-1) なら Cb/Cr を -0.5 シフトして 0 中心にする
-                    // Signed なら既に 0 中心なのでオフセット不要
-                    let y_offset = if *y_is_signed { 0.5 } else { 0.0 }; // Y は符号付きなら +0.5 (DC offset)
+                    let y_offset = if *y_is_signed { 0.5 } else { 0.0 };
                     let c_offset = if *c_is_signed { 0.0 } else { -0.5 };
 
                     let constants = YCbCrConstants {
-                        // D3D11/HLSL のデフォルト（Column-Major）に合わせたパッキング
-                        // mul(v, M) は dot(v, Col_i) を行う。
-                        // Rust 側の各行[0, 1, 2, 3]がそのまま HLSL の Col_i にマッピングされるため、
-                        // 各行に出力チャンネルごとの重みを定義する。
                         color_matrix: [
-                            [1.0, 1.772, 0.0, 0.0],           // Weights for Result.x (Blue)
-                            [1.0, -0.344136, -0.714136, 0.0], // Weights for Result.y (Green)
-                            [1.0, 0.0, 1.402, 0.0],           // Weights for Result.z (Red)
-                            [0.0, 0.0, 0.0, 1.0],             // Weights for Result.w (Alpha)
+                            [1.0, 1.772, 0.0, 0.0],           // Blue
+                            [1.0, -0.344136, -0.714136, 0.0], // Green
+                            [1.0, 0.0, 1.402, 0.0],           // Red
+                            [0.0, 0.0, 0.0, 1.0],             // Alpha
                         ],
                         offset: [y_offset, c_offset, c_offset, 0.0],
                         scale: [scale_val, scale_val, scale_val, 1.0],
-                        interpolation_mode: self.shader_interpolation_mode,
+                        interpolation_mode: match self.interpolation_mode {
+                            InterpolationMode::NearestNeighbor => 0,
+                            InterpolationMode::Linear => 1,
+                            InterpolationMode::Cubic => 2,
+                            InterpolationMode::Lanczos => 3,
+                        },
                         _padding: [0, 0, 0],
                     };
 
@@ -310,197 +298,52 @@ impl Renderer for D3D11Renderer {
                     );
                     self.context.Unmap(&self.constant_buffer, 0);
 
-                    let cbufs = [Some(self.constant_buffer.clone())];
-                    self.context.PSSetConstantBuffers(0, Some(&cbufs));
+                    self.context
+                        .PSSetConstantBuffers(0, Some(&[Some(self.constant_buffer.clone())]));
 
                     self.context.Draw(4, 0);
-
-                    // D2D 描画再開
-                    self.d2d_context.BeginDraw();
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 
     fn get_texture_size(&self, texture: &TextureHandle) -> (f32, f32) {
         match texture {
-            TextureHandle::Direct2D(bitmap) => unsafe {
-                let size = bitmap.GetSize();
-                (size.width, size.height)
+            TextureHandle::D3D11Rgba(srv) => unsafe {
+                if let Ok(res) = srv.GetResource() {
+                    let texture2d: ID3D11Texture2D = res.cast().unwrap();
+                    let mut desc = D3D11_TEXTURE2D_DESC::default();
+                    texture2d.GetDesc(&mut desc);
+                    (desc.Width as f32, desc.Height as f32)
+                } else {
+                    (0.0, 0.0)
+                }
             },
             TextureHandle::D3D11YCbCr { width, height, .. } => (*width as f32, *height as f32),
             _ => (0.0, 0.0),
         }
     }
 
-    fn fill_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F) {
-        unsafe {
-            self.brush.SetColor(color);
-            self.d2d_context.FillRectangle(rect, &self.brush);
-        }
-    }
+    fn fill_rectangle(&self, _rect: &D2D_RECT_F, _color: &D2D1_COLOR_F) {}
 
-    fn draw_rectangle(&self, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, stroke_width: f32) {
-        unsafe {
-            self.brush.SetColor(color);
-            self.d2d_context
-                .DrawRectangle(rect, &self.brush, stroke_width, None);
-        }
-    }
+    fn draw_rectangle(&self, _rect: &D2D_RECT_F, _color: &D2D1_COLOR_F, _stroke_width: f32) {}
 
     fn draw_text(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, large: bool) {
-        // GDI ベースのテキスト描画（D2D との競合を避けるため）
-        use windows::Win32::Graphics::Gdi::*;
-        use windows::core::w;
-
-        let width = (rect.right - rect.left).ceil() as i32;
-        let height = (rect.bottom - rect.top).ceil() as i32;
-        if width <= 0 || height <= 0 {
-            return;
-        }
-
-        unsafe {
-            let hdc = CreateCompatibleDC(None);
-            let info = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: width,
-                    biHeight: -height,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            let mut p_bits: *mut std::ffi::c_void = std::ptr::null_mut();
-            let hbitmap =
-                CreateDIBSection(Some(hdc), &info, DIB_RGB_COLORS, &mut p_bits, None, 0).unwrap();
-            let old_bitmap = SelectObject(hdc, HGDIOBJ(hbitmap.0));
-
-            std::ptr::write_bytes(p_bits, 0, (width * height * 4) as usize);
-
-            let font_height = if large { 32 } else { 18 };
-            let weight = if large { FW_BOLD } else { FW_NORMAL };
-            let hfont = CreateFontW(
-                font_height,
-                0,
-                0,
-                0,
-                weight.0 as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                DEFAULT_QUALITY,
-                DEFAULT_PITCH.0 as u32,
-                w!("Yu Gothic UI"),
-            );
-            let old_font = SelectObject(hdc, HGDIOBJ(hfont.0));
-
-            SetTextColor(hdc, COLORREF(0x00FFFFFF));
-            SetBkMode(hdc, TRANSPARENT);
-
-            let mut wide_text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-            let mut rect_gdi = windows::Win32::Foundation::RECT {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            };
-
-            // テキストアライメント取得
-            let alignment = self.text_format.GetTextAlignment();
-            let mut format = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
-            if alignment == DWRITE_TEXT_ALIGNMENT_CENTER {
-                format |= DT_CENTER;
-            } else if alignment == DWRITE_TEXT_ALIGNMENT_TRAILING {
-                format |= DT_RIGHT;
-            } else {
-                format |= DT_LEFT;
-            }
-
-            DrawTextW(hdc, &mut wide_text, &mut rect_gdi, format);
-
-            // ピクセルデータを RGBA に変換
-            let r = (color.r * 255.0) as u8;
-            let g = (color.g * 255.0) as u8;
-            let b = (color.b * 255.0) as u8;
-
-            let pixel_sl =
-                std::slice::from_raw_parts_mut(p_bits as *mut u32, (width * height) as usize);
-            for p in pixel_sl {
-                let intensity = (*p & 0xFF) as u8;
-                if intensity > 0 {
-                    *p = ((intensity as u32) << 24)
-                        | ((b as u32) << 16)
-                        | ((g as u32) << 8)
-                        | (r as u32);
-                } else {
-                    *p = 0;
-                }
-            }
-
-            // D2D ビットマップとして描画（既存のパイプラインを活用）
-            let bitmap = self
-                .create_d2d_bitmap(
-                    width as u32,
-                    height as u32,
-                    std::slice::from_raw_parts(p_bits as *const u8, (width * height * 4) as usize),
-                )
-                .unwrap();
-            self.d2d_context.DrawBitmap(
-                &bitmap,
-                Some(rect),
-                1.0,
-                D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-                None,
-                None,
-            );
-
-            // GDI Cleanup
-            let _ = SelectObject(hdc, old_font);
-            let _ = DeleteObject(HGDIOBJ(hfont.0));
-            let _ = SelectObject(hdc, old_bitmap);
-            let _ = DeleteObject(HGDIOBJ(hbitmap.0));
-            let _ = DeleteDC(hdc);
-        }
+        self.draw_text_internal(text, rect, color, large);
     }
 
     fn set_interpolation_mode(&mut self, mode: InterpolationMode) {
-        self.interpolation_mode = match mode {
-            InterpolationMode::NearestNeighbor => D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-            InterpolationMode::Linear => D2D1_INTERPOLATION_MODE_LINEAR,
-            InterpolationMode::Cubic => D2D1_INTERPOLATION_MODE_CUBIC,
-            InterpolationMode::Lanczos => D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, // D2D用フォールバック
-        };
-        self.shader_interpolation_mode = match mode {
-            InterpolationMode::NearestNeighbor => 0,
-            InterpolationMode::Linear => 1,
-            InterpolationMode::Cubic => 2,
-            InterpolationMode::Lanczos => 3,
-        };
+        self.interpolation_mode = mode;
     }
 
     fn set_text_alignment(&self, alignment: DWRITE_TEXT_ALIGNMENT) {
-        unsafe {
-            let _ = self.text_format.SetTextAlignment(alignment);
-            let _ = self
-                .text_format
-                .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            let _ = self.text_format_large.SetTextAlignment(alignment);
-            let _ = self
-                .text_format_large
-                .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        }
+        self.text_alignment
+            .store(alignment.0, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn supports_page_turn_animation(&self) -> bool {
-        true // D3D11はページめくりアニメーションをサポート
+        true
     }
 
     fn draw_page_turn(
@@ -510,47 +353,184 @@ impl Renderer for D3D11Renderer {
         binding: BindingDirection,
         from_pages: &[PageDrawInfo],
         to_pages: &[PageDrawInfo],
-        dest_rect: &D2D_RECT_F,
+        _dest_rect: &D2D_RECT_F,
     ) {
-        // シンプルなスライドアニメーション（後で3Dカール効果に拡張予定）
-        // progress: 0.0 = 遷移開始（from表示）、1.0 = 遷移完了（to表示）
+        unsafe {
+            let curl_direction = match (binding, direction) {
+                (BindingDirection::Right, 1) => 1.0f32,
+                (BindingDirection::Right, _) => -1.0,
+                (BindingDirection::Left, 1) => -1.0,
+                (BindingDirection::Left, _) => 1.0,
+            };
 
-        let width = dest_rect.right - dest_rect.left;
-        let eased = 1.0 - (1.0 - progress).powi(3); // ease-out cubic
+            let mut vp = [D3D11_VIEWPORT::default()];
+            let mut vp_count = 1u32;
+            self.context
+                .RSGetViewports(&mut vp_count, Some(vp.as_mut_ptr()));
+            let vp_w = vp[0].Width;
+            let vp_h = vp[0].Height;
 
-        // スライド方向の決定
-        // ユーザーフィードバックに基づき符号を反転
-        let slide_direction = match (binding, direction) {
-            (BindingDirection::Right, 1) => 1.0,
-            (BindingDirection::Right, _) => -1.0,
-            (BindingDirection::Left, 1) => -1.0,
-            (BindingDirection::Left, _) => 1.0,
-        };
+            let rtv = Some(self.render_target_view.clone());
+            self.context.OMSetRenderTargets(Some(&[rtv]), None);
+            self.context.RSSetViewports(Some(&vp));
+            self.context.RSSetState(&self.rasterizer_state);
 
-        let offset = width * eased * slide_direction;
+            let draw_one_page = |page: &PageDrawInfo,
+                                 layer: f32,
+                                 use_curl: bool,
+                                 curl_progress: f32| {
+                let constants = PageCurlConstants {
+                    progress: curl_progress,
+                    direction: curl_direction,
+                    viewport_width: vp_w,
+                    viewport_height: vp_h,
+                    dest_rect: [
+                        page.dest_rect.left,
+                        page.dest_rect.top,
+                        page.dest_rect.right,
+                        page.dest_rect.bottom,
+                    ],
+                    layer,
+                    _padding: [0.0; 3],
+                };
 
-        // 遷移前のページを描画（スライドアウト）
-        for page in from_pages {
-            let mut page_rect = page.dest_rect;
-            // X座標をオフセット分ずらす
-            page_rect.left += offset;
-            page_rect.right += offset;
+                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                self.context
+                    .Map(
+                        &self.page_curl_cb,
+                        0,
+                        D3D11_MAP_WRITE_DISCARD,
+                        0,
+                        Some(&mut mapped),
+                    )
+                    .unwrap();
+                std::ptr::copy_nonoverlapping(
+                    &constants,
+                    mapped.pData as *mut PageCurlConstants,
+                    1,
+                );
+                self.context.Unmap(&self.page_curl_cb, 0);
 
-            // 画面外にスライドアウトしている場合でも描画（クリッピングはレンダラー側で処理）
-            if page_rect.right > 0.0 && page_rect.left < dest_rect.right + width {
-                self.draw_image(page.texture, &page_rect);
+                if use_curl {
+                    self.context.VSSetShader(&self.page_curl_vs, None);
+                } else {
+                    self.context.VSSetShader(&self.vertex_shader, None);
+                }
+
+                let sampler = match self.interpolation_mode {
+                    InterpolationMode::NearestNeighbor => &self.sampler_nearest,
+                    _ => &self.sampler_linear,
+                };
+                self.context
+                    .PSSetSamplers(0, Some(&[Some(sampler.clone())]));
+                self.context.IASetInputLayout(&self.input_layout);
+
+                match &page.texture {
+                    TextureHandle::D3D11Rgba(srv) => {
+                        self.context.PSSetShader(&self.pixel_shader_rgba, None);
+                        self.context
+                            .PSSetShaderResources(0, Some(&[Some(srv.clone())]));
+                    }
+                    TextureHandle::D3D11YCbCr {
+                        y,
+                        cb,
+                        cr,
+                        _precision,
+                        y_is_signed,
+                        c_is_signed,
+                        ..
+                    } => {
+                        self.context.PSSetShader(&self.pixel_shader_ycbcr, None);
+                        let views = [Some(y.clone()), Some(cb.clone()), Some(cr.clone())];
+                        self.context.PSSetShaderResources(0, Some(&views));
+
+                        let max_val = ((1u32 << _precision) - 1) as f32;
+                        let scale_val = 1.0 / max_val;
+                        let y_offset = if *y_is_signed { 0.5 } else { 0.0 };
+                        let c_offset = if *c_is_signed { 0.0 } else { -0.5 };
+
+                        let ycbcr_consts = YCbCrConstants {
+                            color_matrix: [
+                                [1.0, 1.772, 0.0, 0.0],
+                                [1.0, -0.344136, -0.714136, 0.0],
+                                [1.0, 0.0, 1.402, 0.0],
+                                [0.0, 0.0, 0.0, 1.0],
+                            ],
+                            offset: [y_offset, c_offset, c_offset, 0.0],
+                            scale: [scale_val, scale_val, scale_val, 1.0],
+                            interpolation_mode: match self.interpolation_mode {
+                                InterpolationMode::NearestNeighbor => 0,
+                                InterpolationMode::Linear => 1,
+                                InterpolationMode::Cubic => 2,
+                                InterpolationMode::Lanczos => 3,
+                            },
+                            _padding: [0, 0, 0],
+                        };
+                        let mut mapped_ycbcr = D3D11_MAPPED_SUBRESOURCE::default();
+                        self.context
+                            .Map(
+                                &self.constant_buffer,
+                                0,
+                                D3D11_MAP_WRITE_DISCARD,
+                                0,
+                                Some(&mut mapped_ycbcr),
+                            )
+                            .unwrap();
+                        std::ptr::copy_nonoverlapping(
+                            &ycbcr_consts,
+                            mapped_ycbcr.pData as *mut YCbCrConstants,
+                            1,
+                        );
+                        self.context.Unmap(&self.constant_buffer, 0);
+                        self.context
+                            .PSSetConstantBuffers(0, Some(&[Some(self.constant_buffer.clone())]));
+                    }
+                    _ => return,
+                }
+
+                let cbufs = [Some(self.page_curl_cb.clone())];
+                self.context.VSSetConstantBuffers(1, Some(&cbufs));
+
+                if use_curl {
+                    self.context.IASetInputLayout(&self.input_layout);
+                    let stride = std::mem::size_of::<Vertex>() as u32;
+                    let offset = 0u32;
+                    let buffers = [Some(self.curl_vertex_buffer.clone())];
+                    self.context.IASetVertexBuffers(
+                        0,
+                        1,
+                        Some(buffers.as_ptr()),
+                        Some(&stride),
+                        Some(&offset),
+                    );
+                    self.context
+                        .IASetIndexBuffer(&self.curl_index_buffer, DXGI_FORMAT_R32_UINT, 0);
+                    self.context
+                        .IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                    self.context.DrawIndexed(self.curl_index_count, 0, 0);
+                } else {
+                    let stride = std::mem::size_of::<Vertex>() as u32;
+                    let offset = 0u32;
+                    let buffers = [Some(self.vertex_buffer.clone())];
+                    self.context.IASetVertexBuffers(
+                        0,
+                        1,
+                        Some(buffers.as_ptr()),
+                        Some(&stride),
+                        Some(&offset),
+                    );
+                    self.context
+                        .IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+                    self.context.Draw(4, 0);
+                }
+            };
+
+            for page in to_pages {
+                draw_one_page(page, 0.1, false, 0.0);
             }
-        }
 
-        // 遷移後のページを描画（スライドイン）
-        let to_offset = offset - width * slide_direction;
-        for page in to_pages {
-            let mut page_rect = page.dest_rect;
-            page_rect.left += to_offset;
-            page_rect.right += to_offset;
-
-            if page_rect.right > 0.0 && page_rect.left < dest_rect.right + width {
-                self.draw_image(page.texture, &page_rect);
+            for page in from_pages {
+                draw_one_page(page, 0.2, true, progress);
             }
         }
     }
@@ -601,49 +581,13 @@ impl D3D11Renderer {
             let swap_chain =
                 dxgi_factory.CreateSwapChainForHwnd(&device, hwnd, &swap_chain_desc, None, None)?;
 
-            // D2D Interop
-            let d2d_factory: ID2D1Factory1 =
-                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-            let d2d_device = d2d_factory.CreateDevice(&dxgi_device)?;
-            let d2d_context = d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
-
-            let surface: IDXGISurface = swap_chain.GetBuffer(0)?;
-            let d2d_bitmap = d2d_context.CreateBitmapFromDxgiSurface(&surface, None)?;
-            d2d_context.SetTarget(&d2d_bitmap);
-
-            let dw_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            let text_format = dw_factory.CreateTextFormat(
-                w!("Segoe UI"),
-                None,
-                DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                14.0,
-                w!("ja-jp"),
-            )?;
-
-            let text_format_large = dw_factory.CreateTextFormat(
-                w!("Segoe UI"),
-                None,
-                DWRITE_FONT_WEIGHT_BOLD,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                24.0,
-                w!("ja-jp"),
-            )?;
-
-            let brush = d2d_context.CreateSolidColorBrush(
-                &D2D1_COLOR_F {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
-                    a: 1.0,
-                },
-                None,
-            )?;
+            // Create RenderTargetView
+            let back_buffer: ID3D11Texture2D = swap_chain.GetBuffer(0)?;
+            let mut rtv: Option<ID3D11RenderTargetView> = None;
+            device.CreateRenderTargetView(&back_buffer, None, Some(&mut rtv))?;
+            let render_target_view = rtv.unwrap();
 
             // --- Shader Compilation & Resource Creation ---
-
             let quad_src = include_bytes!("shaders/texture_quad.hlsl");
             let ycbcr_src = include_bytes!("shaders/ycbcr_to_rgb.hlsl");
 
@@ -699,7 +643,7 @@ impl D3D11Renderer {
                     SemanticIndex: 0,
                     Format: DXGI_FORMAT_R32G32_FLOAT,
                     InputSlot: 0,
-                    AlignedByteOffset: 12, // 3 * 4 bytes
+                    AlignedByteOffset: 12,
                     InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
                     InstanceDataStepRate: 0,
                 },
@@ -716,60 +660,52 @@ impl D3D11Renderer {
             )?;
             let input_layout = input_layout.unwrap();
 
-            // Vertex Buffer (Full screen quad, Triangle Strip)
+            // Vertex Buffer (Full screen quad)
             let vertices = [
                 Vertex {
                     position: [-1.0, 1.0, 0.0],
                     tex_coord: [0.0, 0.0],
-                }, // Top-Left
+                },
                 Vertex {
                     position: [1.0, 1.0, 0.0],
                     tex_coord: [1.0, 0.0],
-                }, // Top-Right
+                },
                 Vertex {
                     position: [-1.0, -1.0, 0.0],
                     tex_coord: [0.0, 1.0],
-                }, // Bottom-Left
+                },
                 Vertex {
                     position: [1.0, -1.0, 0.0],
                     tex_coord: [1.0, 1.0],
-                }, // Bottom-Right
+                },
             ];
-
             let vb_desc = D3D11_BUFFER_DESC {
                 ByteWidth: (std::mem::size_of::<Vertex>() * vertices.len()) as u32,
                 Usage: D3D11_USAGE_IMMUTABLE,
-                BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32, // ここも cast
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-                StructureByteStride: 0,
+                BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+                ..Default::default()
             };
-
             let vb_data = D3D11_SUBRESOURCE_DATA {
                 pSysMem: vertices.as_ptr() as _,
-                SysMemPitch: 0,
-                SysMemSlicePitch: 0,
+                ..Default::default()
             };
-
             let mut vertex_buffer: Option<ID3D11Buffer> = None;
             device.CreateBuffer(&vb_desc, Some(&vb_data), Some(&mut vertex_buffer))?;
             let vertex_buffer = vertex_buffer.unwrap();
 
             // Constant Buffer
             let cb_desc = D3D11_BUFFER_DESC {
-                ByteWidth: std::mem::size_of::<YCbCrConstants>() as u32, // 16byte alignment check? -> assume it fits 16 bytes multiple
+                ByteWidth: std::mem::size_of::<YCbCrConstants>() as u32,
                 Usage: D3D11_USAGE_DYNAMIC,
                 BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
                 CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
-                MiscFlags: 0,
-                StructureByteStride: 0,
+                ..Default::default()
             };
-
             let mut constant_buffer: Option<ID3D11Buffer> = None;
-            device.CreateBuffer(&cb_desc, None, Some(&mut constant_buffer))?; // created empty
+            device.CreateBuffer(&cb_desc, None, Some(&mut constant_buffer))?;
             let constant_buffer = constant_buffer.unwrap();
 
-            // Sampler State
+            // Samplers
             let sampler_desc = D3D11_SAMPLER_DESC {
                 Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
                 AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
@@ -781,7 +717,6 @@ impl D3D11Renderer {
                 MaxLOD: D3D11_FLOAT32_MAX,
                 ..Default::default()
             };
-
             let mut sampler_linear: Option<ID3D11SamplerState> = None;
             device.CreateSamplerState(&sampler_desc, Some(&mut sampler_linear))?;
             let sampler_linear = sampler_linear.unwrap();
@@ -792,67 +727,127 @@ impl D3D11Renderer {
             device.CreateSamplerState(&sampler_desc_nearest, Some(&mut sampler_nearest))?;
             let sampler_nearest = sampler_nearest.unwrap();
 
-            // Rasterizer State (Cull None)
+            // Rasterizer State
             let rs_desc = D3D11_RASTERIZER_DESC {
                 FillMode: D3D11_FILL_SOLID,
                 CullMode: D3D11_CULL_NONE,
-                FrontCounterClockwise: false.into(),
-                DepthBias: 0,
-                DepthBiasClamp: 0.0,
-                SlopeScaledDepthBias: 0.0,
                 DepthClipEnable: true.into(),
-                ScissorEnable: false.into(),
-                MultisampleEnable: false.into(),
-                AntialiasedLineEnable: false.into(),
+                ..Default::default()
             };
             let mut rasterizer_state: Option<ID3D11RasterizerState> = None;
             device.CreateRasterizerState(&rs_desc, Some(&mut rasterizer_state))?;
             let rasterizer_state = rasterizer_state.unwrap();
 
+            // --- Page Curl Resources ---
+            let page_curl_src = include_bytes!("shaders/page_curl.hlsl");
+            let page_curl_vs_blob = compile_shader(page_curl_src, "VSMain", "vs_5_0")?;
+            let mut page_curl_vs: Option<ID3D11VertexShader> = None;
+            device.CreateVertexShader(
+                std::slice::from_raw_parts(
+                    page_curl_vs_blob.GetBufferPointer() as *const u8,
+                    page_curl_vs_blob.GetBufferSize(),
+                ),
+                None,
+                Some(&mut page_curl_vs),
+            )?;
+            let page_curl_vs = page_curl_vs.unwrap();
+
+            let curl_cb_desc = D3D11_BUFFER_DESC {
+                ByteWidth: std::mem::size_of::<PageCurlConstants>() as u32,
+                Usage: D3D11_USAGE_DYNAMIC,
+                BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+                CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+                ..Default::default()
+            };
+            let mut page_curl_cb: Option<ID3D11Buffer> = None;
+            device.CreateBuffer(&curl_cb_desc, None, Some(&mut page_curl_cb))?;
+            let page_curl_cb = page_curl_cb.unwrap();
+
+            // Grid Mesh
+            let segments = 32u32;
+            let mut curl_vertices = Vec::new();
+            let mut curl_indices = Vec::new();
+            for y in 0..=segments {
+                for x in 0..=segments {
+                    let fx = x as f32 / segments as f32;
+                    let fy = y as f32 / segments as f32;
+                    curl_vertices.push(Vertex {
+                        position: [fx * 2.0 - 1.0, 1.0 - fy * 2.0, 0.0],
+                        tex_coord: [fx, fy],
+                    });
+                }
+            }
+            for y in 0..segments {
+                for x in 0..segments {
+                    let tl = y * (segments + 1) + x;
+                    let tr = tl + 1;
+                    let bl = (y + 1) * (segments + 1) + x;
+                    let br = bl + 1;
+                    curl_indices.extend_from_slice(&[tl, tr, bl, tr, br, bl]);
+                }
+            }
+            let curl_index_count = curl_indices.len() as u32;
+
+            let curl_vb_desc = D3D11_BUFFER_DESC {
+                ByteWidth: (curl_vertices.len() * std::mem::size_of::<Vertex>()) as u32,
+                Usage: D3D11_USAGE_IMMUTABLE,
+                BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+                ..Default::default()
+            };
+            let curl_vb_data = D3D11_SUBRESOURCE_DATA {
+                pSysMem: curl_vertices.as_ptr() as _,
+                ..Default::default()
+            };
+            let mut curl_vertex_buffer: Option<ID3D11Buffer> = None;
+            device.CreateBuffer(
+                &curl_vb_desc,
+                Some(&curl_vb_data),
+                Some(&mut curl_vertex_buffer),
+            )?;
+            let curl_vertex_buffer = curl_vertex_buffer.unwrap();
+
+            let curl_ib_desc = D3D11_BUFFER_DESC {
+                ByteWidth: (curl_indices.len() * std::mem::size_of::<u32>()) as u32,
+                Usage: D3D11_USAGE_IMMUTABLE,
+                BindFlags: D3D11_BIND_INDEX_BUFFER.0 as u32,
+                ..Default::default()
+            };
+            let curl_ib_data = D3D11_SUBRESOURCE_DATA {
+                pSysMem: curl_indices.as_ptr() as _,
+                ..Default::default()
+            };
+            let mut curl_index_buffer: Option<ID3D11Buffer> = None;
+            device.CreateBuffer(
+                &curl_ib_desc,
+                Some(&curl_ib_data),
+                Some(&mut curl_index_buffer),
+            )?;
+            let curl_index_buffer = curl_index_buffer.unwrap();
+
             Ok(Self {
                 device,
                 context,
                 swap_chain,
-                d2d_context,
-                brush,
-                dw_factory,
-                text_format,
-                text_format_large,
-                interpolation_mode: D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-                shader_interpolation_mode: 2, // デフォルトは Cubic
-
+                render_target_view,
                 vertex_shader,
                 input_layout,
-                _pixel_shader_rgba: pixel_shader_rgba,
+                pixel_shader_rgba,
                 pixel_shader_ycbcr,
                 vertex_buffer,
                 constant_buffer,
                 sampler_linear,
                 sampler_nearest,
                 rasterizer_state,
+                page_curl_vs,
+                page_curl_cb,
+                curl_vertex_buffer,
+                curl_index_buffer,
+                curl_index_count,
+                interpolation_mode: InterpolationMode::Linear,
+                text_alignment: std::sync::atomic::AtomicI32::new(
+                    windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_LEADING.0,
+                ),
             })
-        }
-    }
-
-    pub fn create_d2d_bitmap(&self, width: u32, height: u32, data: &[u8]) -> Result<ID2D1Bitmap1> {
-        unsafe {
-            let props = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_R8G8B8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
-                colorContext: ManuallyDrop::new(None),
-            };
-
-            self.d2d_context.CreateBitmap(
-                D2D_SIZE_U { width, height },
-                Some(data.as_ptr() as _),
-                width * 4,
-                &props,
-            )
         }
     }
 
@@ -881,7 +876,7 @@ impl D3D11Renderer {
 
             let init_data = D3D11_SUBRESOURCE_DATA {
                 pSysMem: data.as_ptr() as _,
-                SysMemPitch: width * 4, // 4 bytes per i32
+                SysMemPitch: width * 4,
                 SysMemSlicePitch: 0,
             };
 
@@ -901,11 +896,185 @@ impl D3D11Renderer {
                 },
             };
 
-            let resource: ID3D11Resource = texture.cast()?;
             let mut srv: Option<ID3D11ShaderResourceView> = None;
             self.device
-                .CreateShaderResourceView(&resource, Some(&srv_desc), Some(&mut srv))?;
+                .CreateShaderResourceView(&texture, Some(&srv_desc), Some(&mut srv))?;
             Ok(srv.unwrap())
+        }
+    }
+
+    // ヘルパー: RGBA データからテクスチャを作成
+    fn create_rgba_texture(
+        &self,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Result<ID3D11ShaderResourceView> {
+        unsafe {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM, // GDI は BGRA レイアウト
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+                ..Default::default()
+            };
+            let init_data = D3D11_SUBRESOURCE_DATA {
+                pSysMem: data.as_ptr() as _,
+                SysMemPitch: width * 4,
+                SysMemSlicePitch: 0,
+            };
+            let mut texture: Option<ID3D11Texture2D> = None;
+            self.device
+                .CreateTexture2D(&desc, Some(&init_data), Some(&mut texture))?;
+
+            let mut srv: Option<ID3D11ShaderResourceView> = None;
+            self.device
+                .CreateShaderResourceView(&texture.unwrap(), None, Some(&mut srv))?;
+            Ok(srv.unwrap())
+        }
+    }
+
+    fn draw_text_internal(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, large: bool) {
+        use windows::Win32::Graphics::Gdi::*;
+        use windows::core::w;
+
+        let width = (rect.right - rect.left).ceil() as i32;
+        let height = (rect.bottom - rect.top).ceil() as i32;
+        if width <= 0 || height <= 0 {
+            return;
+        }
+
+        unsafe {
+            let hdc = CreateCompatibleDC(None);
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height, // Top-down
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let mut p_bits: *mut std::ffi::c_void = std::ptr::null_mut();
+            let hbitmap =
+                CreateDIBSection(Some(hdc), &info, DIB_RGB_COLORS, &mut p_bits, None, 0).unwrap();
+            let old_bitmap = SelectObject(hdc, HGDIOBJ(hbitmap.0));
+
+            // バッファをクリア (完全透過)
+            std::ptr::write_bytes(p_bits, 0, (width * height * 4) as usize);
+
+            let font_height = if large { 32 } else { 18 };
+            let weight = if large { FW_BOLD } else { FW_NORMAL };
+            let hfont = CreateFontW(
+                font_height,
+                0,
+                0,
+                0,
+                weight.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY,
+                DEFAULT_PITCH.0 as u32,
+                w!("Yu Gothic UI"),
+            );
+            let old_font = SelectObject(hdc, HGDIOBJ(hfont.0));
+
+            // GDI はアルファチャンネルをサポートしないため、テキスト色を白で描画し
+            // 後でシェーダーまたはブレンドステートで色を付けるか、ここでピクセル操作する。
+            // ここではピクセル操作で色とアルファを適用する。
+            SetTextColor(hdc, COLORREF(0x00FFFFFF)); // 白
+            SetBkMode(hdc, TRANSPARENT);
+
+            let mut wide_text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut rect_gdi = windows::Win32::Foundation::RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            };
+
+            // アライメント (Atomic からロード)
+            let alignment = self
+                .text_alignment
+                .load(std::sync::atomic::Ordering::Relaxed) as u32;
+            let mut format = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
+
+            // DWRITE_TEXT_ALIGNMENT と GDI フラグのマッピング
+            // LEADING (0) -> LEFT
+            // TRAILING (1) -> RIGHT
+            // CENTER (2) -> CENTER
+            if alignment == 2 {
+                format |= DT_CENTER;
+            } else if alignment == 1 {
+                format |= DT_RIGHT;
+            } else {
+                format |= DT_LEFT;
+            }
+
+            DrawTextW(hdc, &mut wide_text, &mut rect_gdi, format);
+
+            // ピクセル操作: GDI が描画した白(R=G=B=255)を元に、指定色のアルファ付きピクセルにする
+            // GDI の DrawText はアンチエイリアスで中間色を出力する可能性がある。
+            // 背景が黒(0)で前景色が白(255)なので、Rチャンネルの値をそのままアルファとして使用できる。
+            let r_target = (color.r * 255.0) as u8;
+            let g_target = (color.g * 255.0) as u8;
+            let b_target = (color.b * 255.0) as u8;
+
+            let pixel_sl =
+                std::slice::from_raw_parts_mut(p_bits as *mut u32, (width * height) as usize);
+            for p in pixel_sl {
+                // BGRA 順序 (Windows GDI)
+                let intensity = (*p & 0xFF) as u8; // Blue channel (White text -> all channels same)
+                if intensity > 0 {
+                    // pre-multiplied alpha
+                    // intensity(0-255) をアルファとして扱う
+                    let alpha = intensity;
+                    let r = (r_target as u32 * alpha as u32) / 255;
+                    let g = (g_target as u32 * alpha as u32) / 255;
+                    let b = (b_target as u32 * alpha as u32) / 255;
+
+                    *p = ((alpha as u32) << 24) | (r << 16) | (g << 8) | b;
+                } else {
+                    *p = 0;
+                }
+            }
+
+            // D3D11 テクスチャ作成
+            let texture_srv = self
+                .create_rgba_texture(
+                    width as u32,
+                    height as u32,
+                    std::slice::from_raw_parts(p_bits as *const u8, (width * height * 4) as usize),
+                )
+                .unwrap();
+            let texture_handle = TextureHandle::D3D11Rgba(texture_srv);
+
+            // 描画
+            self.draw_image(&texture_handle, rect);
+
+            // cleanup
+            let _ = SelectObject(hdc, old_font);
+            let _ = DeleteObject(HGDIOBJ(hfont.0));
+            let _ = SelectObject(hdc, old_bitmap);
+            let _ = DeleteObject(HGDIOBJ(hbitmap.0));
+            let _ = DeleteDC(hdc);
         }
     }
 }
