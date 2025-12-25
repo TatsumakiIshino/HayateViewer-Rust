@@ -353,16 +353,11 @@ impl Renderer for D3D11Renderer {
         binding: BindingDirection,
         from_pages: &[PageDrawInfo],
         to_pages: &[PageDrawInfo],
-        _dest_rect: &D2D_RECT_F,
+        viewport_rect: &D2D_RECT_F,
+        animation_type: &str,
     ) {
         unsafe {
-            let curl_direction = match (binding, direction) {
-                (BindingDirection::Right, 1) => 1.0f32,
-                (BindingDirection::Right, _) => -1.0,
-                (BindingDirection::Left, 1) => -1.0,
-                (BindingDirection::Left, _) => 1.0,
-            };
-
+            // ビューポート取得
             let mut vp = [D3D11_VIEWPORT::default()];
             let mut vp_count = 1u32;
             self.context
@@ -370,10 +365,53 @@ impl Renderer for D3D11Renderer {
             let vp_w = vp[0].Width;
             let vp_h = vp[0].Height;
 
+            // Render Target 設定などは draw_image 相当が必要だが、
+            // ここでは draw_page_turn が独自に設定している
             let rtv = Some(self.render_target_view.clone());
             self.context.OMSetRenderTargets(Some(&[rtv]), None);
             self.context.RSSetViewports(Some(&vp));
             self.context.RSSetState(&self.rasterizer_state);
+
+            if animation_type == "slide" {
+                // スライドアニメーション
+                // Right開きでNext(1)の場合、左側のページを見に行くので、全体は右にスライドする
+                let slide_dir = direction as f32
+                    * if binding == BindingDirection::Right {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                let width = viewport_rect.right - viewport_rect.left; // 基本的に vp_w と同じはずだが引数を使用
+
+                // From Pages (退出)
+                // 進行度に応じてスライドアウト
+                let from_offset_x = slide_dir * width * progress;
+                for page in from_pages {
+                    let mut rect = page.dest_rect;
+                    rect.left += from_offset_x;
+                    rect.right += from_offset_x;
+                    self.draw_image(&page.texture, &rect);
+                }
+
+                // To Pages (進入)
+                // 画面外からスライドイン
+                let to_offset_x = slide_dir * width * (progress - 1.0);
+                for page in to_pages {
+                    let mut rect = page.dest_rect;
+                    rect.left += to_offset_x;
+                    rect.right += to_offset_x;
+                    self.draw_image(&page.texture, &rect);
+                }
+                return;
+            }
+
+            // 以下、既存のカールアニメーション実装
+            let curl_direction = match (binding, direction) {
+                (BindingDirection::Right, 1) => 1.0f32,
+                (BindingDirection::Right, _) => -1.0,
+                (BindingDirection::Left, 1) => -1.0,
+                (BindingDirection::Left, _) => 1.0,
+            };
 
             let draw_one_page = |page: &PageDrawInfo,
                                  layer: f32,

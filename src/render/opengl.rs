@@ -797,8 +797,10 @@ impl Renderer for OpenGLRenderer {
         from_pages: &[PageDrawInfo],
         to_pages: &[PageDrawInfo],
         dest_rect: &D2D_RECT_F,
+        _animation_type: &str,
     ) {
         // シンプルなスライドアニメーション
+        // animation_type による分岐は現状なし（常にスライド）
         let width = dest_rect.right - dest_rect.left;
         let eased = 1.0 - (1.0 - progress).powi(3); // ease-out cubic
 

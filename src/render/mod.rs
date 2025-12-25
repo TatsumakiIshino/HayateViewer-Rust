@@ -48,6 +48,7 @@ pub trait Renderer: Send + Sync {
         _from_pages: &[PageDrawInfo],
         _to_pages: &[PageDrawInfo],
         _viewport_rect: &D2D_RECT_F,
+        _animation_type: &str,
     ) {
         // デフォルト実装は何もしない（D2Dなど非対応バックエンド用）
     }

@@ -1092,7 +1092,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app_state.binding_direction,
                             &from_layout,
                             &to_layout,
-                            &viewport_rect
+                            &viewport_rect,
+                            &settings.page_turn_animation_type
                         );
                     } else {
                         // 通常描画
@@ -1469,6 +1470,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 UserEvent::SetMaxHistoryCount(count) => {
                     settings.max_history_count = count;
                     let _ = settings.save("config.json");
+                }
+                UserEvent::TogglePageTurnAnimation => {
+                    settings.page_turn_animation_enabled = !settings.page_turn_animation_enabled;
+                    let _ = settings.save("config.json");
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                }
+                UserEvent::ChangePageTurnDuration => {
+                    let duration = settings.page_turn_duration;
+                    settings.page_turn_duration = if duration < 0.2 { 0.3 }
+                        else if duration < 0.4 { 0.5 }
+                        else if duration < 0.7 { 0.8 }
+                        else if duration < 0.9 { 1.0 }
+                        else { 0.1 };
+                    let _ = settings.save("config.json");
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                }
+                UserEvent::RotatePageTurnAnimationType => {
+                     settings.page_turn_animation_type = if settings.page_turn_animation_type == "slide" {
+                         "curl".to_string()
+                     } else {
+                         "slide".to_string()
+                     };
+                     let _ = settings.save("config.json");
+                     if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
                 }
             }
         },

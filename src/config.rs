@@ -34,6 +34,8 @@ pub struct Settings {
     pub page_turn_animation_enabled: bool,
     /// ページめくりアニメーションの速度（秒単位、0.1〜2.0）
     pub page_turn_duration: f32,
+    /// ページめくりアニメーションの種類 ("slide", "curl", "none")
+    pub page_turn_animation_type: String,
 }
 
 impl Default for Settings {
@@ -60,6 +62,7 @@ impl Default for Settings {
             max_history_count: 50,
             page_turn_animation_enabled: true,
             page_turn_duration: 0.5,
+            page_turn_animation_type: "slide".to_string(),
         }
     }
 }
