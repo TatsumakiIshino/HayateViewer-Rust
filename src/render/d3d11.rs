@@ -29,6 +29,7 @@ pub struct D3D11Renderer {
 
     // Page Curl Resources
     page_curl_vs: ID3D11VertexShader,
+    page_curl_ps: ID3D11PixelShader,
     page_curl_cb: ID3D11Buffer,
     curl_vertex_buffer: ID3D11Buffer,
     curl_index_buffer: ID3D11Buffer,
@@ -63,8 +64,10 @@ struct PageCurlConstants {
     viewport_width: f32,
     viewport_height: f32,
     dest_rect: [f32; 4],
+    total_rect: [f32; 4],
     layer: f32,
-    _padding: [f32; 3],
+    is_back_face: f32,
+    _padding: [f32; 2],
 }
 
 fn compile_shader(source: &[u8], entry_point: &str, target: &str) -> Result<ID3DBlob> {
@@ -413,10 +416,29 @@ impl Renderer for D3D11Renderer {
                 (BindingDirection::Left, _) => 1.0,
             };
 
+            // 全体矩形の計算
+            let calc_total_rect = |pages: &[PageDrawInfo]| -> [f32; 4] {
+                if pages.is_empty() {
+                    return [0.0, 0.0, vp_w, vp_h];
+                }
+                let mut r = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+                for p in pages {
+                    r[0] = r[0].min(p.dest_rect.left);
+                    r[1] = r[1].min(p.dest_rect.top);
+                    r[2] = r[2].max(p.dest_rect.right);
+                    r[3] = r[3].max(p.dest_rect.bottom);
+                }
+                r
+            };
+            let total_rect_from = calc_total_rect(from_pages);
+            let total_rect_to = calc_total_rect(to_pages);
+
             let draw_one_page = |page: &PageDrawInfo,
                                  layer: f32,
                                  use_curl: bool,
-                                 curl_progress: f32| {
+                                 curl_progress: f32,
+                                 total_rect: [f32; 4],
+                                 is_back_face: bool| {
                 let constants = PageCurlConstants {
                     progress: curl_progress,
                     direction: curl_direction,
@@ -428,8 +450,10 @@ impl Renderer for D3D11Renderer {
                         page.dest_rect.right,
                         page.dest_rect.bottom,
                     ],
+                    total_rect,
                     layer,
-                    _padding: [0.0; 3],
+                    is_back_face: if is_back_face { 1.0 } else { 0.0 },
+                    _padding: [0.0; 2],
                 };
 
                 let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
@@ -465,7 +489,11 @@ impl Renderer for D3D11Renderer {
 
                 match &page.texture {
                     TextureHandle::D3D11Rgba(srv) => {
-                        self.context.PSSetShader(&self.pixel_shader_rgba, None);
+                        if use_curl {
+                            self.context.PSSetShader(&self.page_curl_ps, None);
+                        } else {
+                            self.context.PSSetShader(&self.pixel_shader_rgba, None);
+                        }
                         self.context
                             .PSSetShaderResources(0, Some(&[Some(srv.clone())]));
                     }
@@ -528,6 +556,9 @@ impl Renderer for D3D11Renderer {
 
                 let cbufs = [Some(self.page_curl_cb.clone())];
                 self.context.VSSetConstantBuffers(1, Some(&cbufs));
+                if use_curl {
+                    self.context.PSSetConstantBuffers(1, Some(&cbufs));
+                }
 
                 if use_curl {
                     self.context.IASetInputLayout(&self.input_layout);
@@ -564,11 +595,45 @@ impl Renderer for D3D11Renderer {
             };
 
             for page in to_pages {
-                draw_one_page(page, 0.1, false, 0.0);
+                draw_one_page(page, 0.5, true, 0.0, total_rect_to, false);
             }
 
             for page in from_pages {
-                draw_one_page(page, 0.2, true, progress);
+                // 表面
+                draw_one_page(page, 0.1, true, progress, total_rect_from, false);
+
+                // 裏面描画 (Back Face)
+                let center_x = (total_rect_from[0] + total_rect_from[2]) * 0.5;
+                let is_left = page.dest_rect.left < center_x;
+
+                // direction > 0 means Forward, < 0 means Backward
+                // In Right-to-Left binding:
+                //   Forward: Left-side page curls to reveal next.
+                //   Backward: Right-side page curls (to put back).
+                // In Left-to-Right binding:
+                //   Forward: Right-side page curls.
+                //   Backward: Left-side page curls.
+                let is_curling_page = if binding == BindingDirection::Right {
+                    if direction > 0 { is_left } else { !is_left }
+                } else {
+                    if direction > 0 { !is_left } else { is_left }
+                };
+
+                if is_curling_page {
+                    let center_to = (total_rect_to[0] + total_rect_to[2]) * 0.5;
+                    let target_back_is_left = !is_left;
+
+                    let back_page = to_pages.iter().find(|p| {
+                        let p_is_left = p.dest_rect.left < center_to;
+                        p_is_left == target_back_is_left
+                    });
+
+                    if let Some(bp) = back_page {
+                        let mut back_page_info = page.clone();
+                        back_page_info.texture = bp.texture;
+                        draw_one_page(&back_page_info, 0.1, true, progress, total_rect_from, true);
+                    }
+                }
             }
         }
     }
@@ -862,6 +927,18 @@ impl D3D11Renderer {
             )?;
             let curl_index_buffer = curl_index_buffer.unwrap();
 
+            let page_curl_ps_blob = compile_shader(page_curl_src, "PSMain", "ps_5_0")?;
+            let mut page_curl_ps: Option<ID3D11PixelShader> = None;
+            device.CreatePixelShader(
+                std::slice::from_raw_parts(
+                    page_curl_ps_blob.GetBufferPointer() as *const u8,
+                    page_curl_ps_blob.GetBufferSize(),
+                ),
+                None,
+                Some(&mut page_curl_ps),
+            )?;
+            let page_curl_ps = page_curl_ps.unwrap();
+
             Ok(Self {
                 device,
                 context,
@@ -877,6 +954,7 @@ impl D3D11Renderer {
                 sampler_nearest,
                 rasterizer_state,
                 page_curl_vs,
+                page_curl_ps,
                 page_curl_cb,
                 curl_vertex_buffer,
                 curl_index_buffer,
