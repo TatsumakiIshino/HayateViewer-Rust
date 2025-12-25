@@ -350,22 +350,124 @@ impl Renderer for D3D11Renderer {
     }
 
     fn draw_text(&self, text: &str, rect: &D2D_RECT_F, color: &D2D1_COLOR_F, large: bool) {
+        // GDI ベースのテキスト描画（D2D との競合を避けるため）
+        use windows::Win32::Graphics::Gdi::*;
+        use windows::core::w;
+
+        let width = (rect.right - rect.left).ceil() as i32;
+        let height = (rect.bottom - rect.top).ceil() as i32;
+        if width <= 0 || height <= 0 {
+            return;
+        }
+
         unsafe {
-            self.brush.SetColor(color);
-            let wide_text: Vec<u16> = text.encode_utf16().collect();
-            let format = if large {
-                &self.text_format_large
-            } else {
-                &self.text_format
+            let hdc = CreateCompatibleDC(None);
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
             };
-            self.d2d_context.DrawText(
-                &wide_text,
-                format,
-                rect,
-                &self.brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
+
+            let mut p_bits: *mut std::ffi::c_void = std::ptr::null_mut();
+            let hbitmap =
+                CreateDIBSection(Some(hdc), &info, DIB_RGB_COLORS, &mut p_bits, None, 0).unwrap();
+            let old_bitmap = SelectObject(hdc, HGDIOBJ(hbitmap.0));
+
+            std::ptr::write_bytes(p_bits, 0, (width * height * 4) as usize);
+
+            let font_height = if large { 32 } else { 18 };
+            let weight = if large { FW_BOLD } else { FW_NORMAL };
+            let hfont = CreateFontW(
+                font_height,
+                0,
+                0,
+                0,
+                weight.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY,
+                DEFAULT_PITCH.0 as u32,
+                w!("Yu Gothic UI"),
             );
+            let old_font = SelectObject(hdc, HGDIOBJ(hfont.0));
+
+            SetTextColor(hdc, COLORREF(0x00FFFFFF));
+            SetBkMode(hdc, TRANSPARENT);
+
+            let mut wide_text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut rect_gdi = windows::Win32::Foundation::RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            };
+
+            // テキストアライメント取得
+            let alignment = self.text_format.GetTextAlignment();
+            let mut format = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
+            if alignment == DWRITE_TEXT_ALIGNMENT_CENTER {
+                format |= DT_CENTER;
+            } else if alignment == DWRITE_TEXT_ALIGNMENT_TRAILING {
+                format |= DT_RIGHT;
+            } else {
+                format |= DT_LEFT;
+            }
+
+            DrawTextW(hdc, &mut wide_text, &mut rect_gdi, format);
+
+            // ピクセルデータを RGBA に変換
+            let r = (color.r * 255.0) as u8;
+            let g = (color.g * 255.0) as u8;
+            let b = (color.b * 255.0) as u8;
+
+            let pixel_sl =
+                std::slice::from_raw_parts_mut(p_bits as *mut u32, (width * height) as usize);
+            for p in pixel_sl {
+                let intensity = (*p & 0xFF) as u8;
+                if intensity > 0 {
+                    *p = ((intensity as u32) << 24)
+                        | ((b as u32) << 16)
+                        | ((g as u32) << 8)
+                        | (r as u32);
+                } else {
+                    *p = 0;
+                }
+            }
+
+            // D2D ビットマップとして描画（既存のパイプラインを活用）
+            let bitmap = self
+                .create_d2d_bitmap(
+                    width as u32,
+                    height as u32,
+                    std::slice::from_raw_parts(p_bits as *const u8, (width * height * 4) as usize),
+                )
+                .unwrap();
+            self.d2d_context.DrawBitmap(
+                &bitmap,
+                Some(rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                None,
+                None,
+            );
+
+            // GDI Cleanup
+            let _ = SelectObject(hdc, old_font);
+            let _ = DeleteObject(HGDIOBJ(hfont.0));
+            let _ = SelectObject(hdc, old_bitmap);
+            let _ = DeleteObject(HGDIOBJ(hbitmap.0));
+            let _ = DeleteDC(hdc);
         }
     }
 
