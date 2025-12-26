@@ -591,16 +591,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             last_dialog_close = std::time::Instant::now();
                         }
-                        Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowLeft) => {
+                        Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::Home) | Key::Named(NamedKey::End) => {
                             // ページ移動
-                            let direction = if logical_key == Key::Named(NamedKey::ArrowRight) { 1 } else { -1 };
-                            if modifiers.shift_key() {
-                                app_state.navigate(direction * 10);
-                            } else if modifiers.control_key() {
-                                let new_idx = (app_state.current_page_index as isize + direction as isize).clamp(0, (app_state.image_files.len() as isize - 1).max(0)) as usize;
-                                app_state.current_page_index = new_idx;
-                            } else {
-                                app_state.navigate(direction);
+                            match logical_key {
+                                Key::Named(NamedKey::Home) => {
+                                    app_state.current_page_index = 0;
+                                }
+                                Key::Named(NamedKey::End) => {
+                                    app_state.current_page_index = app_state.image_files.len().saturating_sub(1);
+                                    app_state.current_page_index = app_state.snap_to_spread(app_state.current_page_index);
+                                }
+                                _ => {
+                                    let direction = if logical_key == Key::Named(NamedKey::ArrowRight) { 1 } else { -1 };
+                                    if modifiers.shift_key() {
+                                        app_state.navigate(direction * 10);
+                                    } else if modifiers.control_key() {
+                                        let new_idx = (app_state.current_page_index as isize + direction as isize).clamp(0, (app_state.image_files.len() as isize - 1).max(0)) as usize;
+                                        app_state.current_page_index = new_idx;
+                                    } else {
+                                        app_state.navigate(direction);
+                                    }
+                                }
                             }
                             view_state.reset();
                             let l = loader.clone();
