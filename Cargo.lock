@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "hayate-viewer-rust"
-version = "0.6.1-test"
+version = "0.6.3-test"
 dependencies = [
  "bytemuck",
  "crc",

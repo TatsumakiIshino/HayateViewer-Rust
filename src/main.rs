@@ -420,6 +420,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_dialog_close = std::time::Instant::now();
     let mut modern_settings: Option<ui::modern_settings::ModernSettingsWindow> = None;
     let mut modern_history: Option<ui::history::HistoryWindow> = None;
+    let mut modern_help: Option<ui::help::HelpWindow> = None;
 
     event_loop.run(move |event: Event<UserEvent>, elwt: &winit::event_loop::EventLoopWindowTarget<UserEvent>| {
         elwt.set_control_flow(ControlFlow::Wait);
@@ -447,6 +448,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             mh.draw(&settings);
                         }
                         return;
+                    }
+                }
+
+                if let Some(ref mut mhelp) = modern_help {
+                    if mhelp.window.id() == window_id {
+                        if mhelp.handle_event(&event) {
+                            modern_help = None;
+                            last_dialog_close = std::time::Instant::now();
+                        } else if matches!(event, WindowEvent::RedrawRequested) {
+                            mhelp.draw();
+                        }
+                        // ここから return を削除しました。
                     }
                 }
 
@@ -557,6 +570,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     Err(e) => {
                                         println!("Failed to open Modern UI: {:?}", e);
+                                    }
+                                }
+                            }
+                            last_dialog_close = std::time::Instant::now();
+                        }
+                        Key::Character(ref s) if s.to_lowercase() == "h" => {
+                            // H: ヘルプ画面を開く
+                            if last_dialog_close.elapsed() < std::time::Duration::from_millis(500) {
+                                return;
+                            }
+                            
+                            if modern_help.is_none() { // ヘルプウィンドウが開いていない場合のみ開く
+                                match ui::help::HelpWindow::new(elwt, hwnd) {
+                                    Ok(mw) => {
+                                        modern_help = Some(mw);
+                                    }
+                                    Err(e) => {
+                                        println!("Failed to open Help Window: {:?}", e);
                                     }
                                 }
                             }
