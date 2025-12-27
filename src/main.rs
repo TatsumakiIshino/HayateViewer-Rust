@@ -627,6 +627,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     app_state.is_spread_view = false;
                                 }
+
+                                // 設定を同期
+                                settings.is_spread_view = app_state.is_spread_view;
+                                settings.binding_direction = if app_state.binding_direction == BindingDirection::Right { 
+                                    "right".to_string() 
+                                } else { 
+                                    "left".to_string() 
+                                };
+                                let _ = settings.save("config.json");
+
+                                // オプション画面が開いていれば再描画をリクエスト
+                                if let Some(ref mut ms) = modern_settings {
+                                    ms.window.request_redraw();
+                                }
+                                
+                                view_state.reset();
+                                request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
                         }
                         Key::Named(NamedKey::PageUp) | Key::Named(NamedKey::PageDown) => {
                             // PageUp/PageDown: 履歴を順にナビゲート
