@@ -55,7 +55,7 @@ cargo run
 cargo build --release
 ```
 
-バイナリは `target/release/hayate-viewer-rust.exe` に生成されます。
+バイナリは `target/release/HayateViewer-Rust.exe` に生成されます。
 
 ## 操作方法
 

@@ -165,7 +165,7 @@ impl Renderer for D3D11Renderer {
                     _subsampling: *subsampling,
                     _precision: *precision,
                     y_is_signed: *y_is_signed,
-                    c_is_signed: *c_is_signed,
+                    _c_is_signed: *c_is_signed,
                 })
             }
         }
@@ -230,7 +230,6 @@ impl Renderer for D3D11Renderer {
                     cr,
                     _precision: precision,
                     y_is_signed,
-                    c_is_signed,
                     ..
                 } => {
                     self.context.PSSetShader(&self.pixel_shader_ycbcr, None);
@@ -241,15 +240,15 @@ impl Renderer for D3D11Renderer {
                     // Constants
                     let max_val = ((1u32 << precision) - 1) as f32;
                     let scale_val = 1.0 / max_val;
-                    let y_offset = if *y_is_signed { 0.5 } else { 0.0 };
-                    let c_offset = if *c_is_signed { 0.0 } else { -0.5 };
+                    let y_offset = 0.0;
+                    let c_offset = -128.0;
 
                     let constants = YCbCrConstants {
                         color_matrix: [
-                            [1.0, 1.772, 0.0, 0.0],           // Blue
-                            [1.0, -0.344136, -0.714136, 0.0], // Green
-                            [1.0, 0.0, 1.402, 0.0],           // Red
-                            [0.0, 0.0, 0.0, 1.0],             // Alpha
+                            [1.0, 1.0, 1.0, 0.0],           // Y contribution to RGB
+                            [0.0, -0.344136, 1.772, 0.0],  // Cb contribution to RGB
+                            [1.402, -0.714136, 0.0, 0.0],  // Cr contribution to RGB
+                            [0.0, 0.0, 0.0, 1.0],          // Constant
                         ],
                         offset: [y_offset, c_offset, c_offset, 0.0],
                         scale: [scale_val, scale_val, scale_val, 1.0],
@@ -352,7 +351,7 @@ impl D3D11Renderer {
             let swap_chain_desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: 0,
                 Height: 0,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
                 Stereo: false.into(),
                 SampleDesc: DXGI_SAMPLE_DESC {
                     Count: 1,
@@ -613,7 +612,7 @@ impl D3D11Renderer {
                 Height: height,
                 MipLevels: 1,
                 ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM, // GDI は BGRA レイアウト
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, // sRGB ガンマ補正を適用
                 SampleDesc: DXGI_SAMPLE_DESC {
                     Count: 1,
                     Quality: 0,

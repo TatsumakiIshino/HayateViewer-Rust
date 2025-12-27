@@ -57,7 +57,7 @@ pub enum TextureHandle {
         _subsampling: (u8, u8),
         _precision: u8,
         y_is_signed: bool,
-        c_is_signed: bool,
+        _c_is_signed: bool,
     },
     #[allow(dead_code)]
     OpenGL {
@@ -74,7 +74,7 @@ pub enum TextureHandle {
         _subsampling: (u8, u8),
         _precision: u8,
         y_is_signed: bool,
-        c_is_signed: bool,
+        _c_is_signed: bool,
     },
     // 将来的に追加:
     // Wgpu(wgpu::TextureView),

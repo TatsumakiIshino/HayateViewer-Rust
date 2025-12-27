@@ -3,6 +3,32 @@
 version = 4
 
 [[package]]
+name = "HayateViewer-Rust"
+version = "0.6.4-test"
+dependencies = [
+ "bytemuck",
+ "crc",
+ "glow",
+ "glutin",
+ "glutin-winit",
+ "image",
+ "jpeg2k",
+ "lru",
+ "natord",
+ "raw-window-handle 0.5.2",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sevenz-rust",
+ "tokio",
+ "unrar",
+ "walkdir",
+ "windows",
+ "winit",
+ "zip",
+]
+
+[[package]]
 name = "ab_glyph"
 version = "0.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -901,32 +927,6 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
-]
-
-[[package]]
-name = "hayate-viewer-rust"
-version = "0.6.3-test"
-dependencies = [
- "bytemuck",
- "crc",
- "glow",
- "glutin",
- "glutin-winit",
- "image",
- "jpeg2k",
- "lru",
- "natord",
- "raw-window-handle 0.5.2",
- "rayon",
- "serde",
- "serde_json",
- "sevenz-rust",
- "tokio",
- "unrar",
- "walkdir",
- "windows",
- "winit",
- "zip",
 ]
 
 [[package]]

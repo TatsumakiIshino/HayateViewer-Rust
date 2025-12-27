@@ -462,7 +462,7 @@ impl Renderer for OpenGLRenderer {
                         _subsampling: *subsampling,
                         _precision: *precision,
                         y_is_signed: *y_is_signed,
-                        c_is_signed: *c_is_signed,
+                        _c_is_signed: *c_is_signed,
                     })
                 }
             }
@@ -515,7 +515,6 @@ impl Renderer for OpenGLRenderer {
                     width,
                     height,
                     y_is_signed,
-                    c_is_signed,
                     ..
                 } => {
                     self.gl.uniform_1_i32(Some(&self.u_is_ycbcr), 1);
@@ -525,7 +524,7 @@ impl Renderer for OpenGLRenderer {
                         *height as f32,
                     );
                     let y_offset = if *y_is_signed { 0.5 } else { 0.0 };
-                    let c_offset = if *c_is_signed { 0.0 } else { -0.5 };
+                    let c_offset = -0.5;
                     let matrix = [
                         1.0, 1.0, 1.0, 0.0, 0.0, -0.344136, 1.772, 0.0, 1.402, -0.714136, 0.0, 0.0,
                         0.0, 0.0, 0.0, 1.0,
