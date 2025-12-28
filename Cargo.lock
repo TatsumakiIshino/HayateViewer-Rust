@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "HayateViewer-Rust"
-version = "0.6.4-test"
+version = "0.6.5-test"
 dependencies = [
  "bytemuck",
  "crc",

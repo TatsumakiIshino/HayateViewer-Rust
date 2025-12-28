@@ -1,6 +1,6 @@
 [package]
 name = "HayateViewer-Rust"
-version = "0.6.4-test"
+version = "0.6.5-test"
 edition = "2024"
 
 [dependencies]

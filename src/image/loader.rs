@@ -43,6 +43,9 @@ pub enum UserEvent {
     ClearHistory,
     DeleteHistoryItem(usize),
     SetMaxHistoryCount(usize),
+    SetMaxCacheSize(u64),
+    SetCpuPrefetchPages(usize),
+    SetGpuPrefetchPages(usize),
 }
 
 pub struct AsyncLoader {

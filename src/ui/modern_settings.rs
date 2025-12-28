@@ -257,7 +257,7 @@ impl ModernSettingsWindow {
 
         // 全般タブ内のクリック判定
         if self.selected_tab == 0 {
-            let items = [210.0, 250.0, 290.0, 330.0, 370.0];
+            let items = [210.0, 250.0, 290.0, 330.0, 370.0, 410.0, 450.0, 490.0];
             for (idx, &top) in items.iter().enumerate() {
                 let rect = D2D_RECT_F {
                     left: 40.0,
@@ -545,6 +545,36 @@ impl ModernSettingsWindow {
             30.0,
             false,
             focus_idx == Some(4),
+        );
+        self.draw_button(
+            "CPUキャッシュ",
+            &format!("{} MB", settings.max_cache_size_mb),
+            40.0,
+            410.0,
+            160.0,
+            30.0,
+            false,
+            focus_idx == Some(5),
+        );
+        self.draw_button(
+            "先読み(CPU)",
+            &format!("{} ページ", settings.cpu_max_prefetch_pages),
+            40.0,
+            450.0,
+            160.0,
+            30.0,
+            false,
+            focus_idx == Some(6),
+        );
+        self.draw_button(
+            "先読み(GPU)",
+            &format!("{} ページ", settings.gpu_max_prefetch_pages),
+            40.0,
+            490.0,
+            160.0,
+            30.0,
+            false,
+            focus_idx == Some(7),
         );
     }
 
@@ -954,7 +984,7 @@ impl ModernSettingsWindow {
 
     fn get_item_count(&self) -> usize {
         match self.selected_tab {
-            0 => 5, // 全般: 表示モード, 先頭単一, ステータスバー, ルーペ倍率, 履歴件数
+            0 => 8, // 全般: 表示モード, 先頭単一, ステータスバー, ルーペ倍率, 履歴件数, キャッシュ, CPU先読み, GPU先読み
             1 => 4, // レンダリング: エンジン, CPUサンプリング, GPUサンプリング, CPU色変換
             _ => 0,
         }
@@ -999,6 +1029,39 @@ impl ModernSettingsWindow {
                     let _ = self
                         .event_proxy
                         .send_event(crate::image::loader::UserEvent::SetMaxHistoryCount(count));
+                }
+                5 => {
+                    let mut size = settings.max_cache_size_mb;
+                    if direction > 0 {
+                        size = if size >= 16384 { 512 } else { size + 512 };
+                    } else {
+                        size = if size <= 512 { 16384 } else { size - 512 };
+                    }
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::SetMaxCacheSize(size));
+                }
+                6 => {
+                    let mut pages = settings.cpu_max_prefetch_pages;
+                    if direction > 0 {
+                        pages = if pages >= 50 { 0 } else { pages + 5 };
+                    } else {
+                        pages = if pages <= 0 { 50 } else { pages.saturating_sub(5) };
+                    }
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::SetCpuPrefetchPages(pages));
+                }
+                7 => {
+                    let mut pages = settings.gpu_max_prefetch_pages;
+                    if direction > 0 {
+                        pages = if pages >= 50 { 0 } else { pages + 5 };
+                    } else {
+                        pages = if pages <= 0 { 50 } else { pages.saturating_sub(5) };
+                    }
+                    let _ = self
+                        .event_proxy
+                        .send_event(crate::image::loader::UserEvent::SetGpuPrefetchPages(pages));
                 }
                 _ => {}
             }

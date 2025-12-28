@@ -63,10 +63,6 @@ impl ImageCache {
         self.protected_indices = protected.into_iter().collect();
     }
 
-    fn extract_index(key: &str) -> Option<usize> {
-        key.rsplit("::").next()?.parse().ok()
-    }
-
     pub fn get(&mut self, key: &CacheKey) -> Option<Arc<DecodedImage>> {
         self.cache.get(key).cloned()
     }
@@ -82,51 +78,12 @@ impl ImageCache {
         self.current_bytes += size;
         self.cache.put(key, image);
 
-        // メモリ上限を超えている間、現在位置から最も遠いものから削除
-        // 表示中のページ（protected_indices）は削除対象から外す
+        // メモリ上限を超えている間、LRU（古いもの）から削除
         while self.current_bytes > self.max_bytes && self.cache.len() > 1 {
-            let mut farthest_key = None;
-            let mut max_dist = -1isize;
-
-            for (k, _) in self.cache.iter() {
-                if let Some(idx) = Self::extract_index(k) {
-                    if self.protected_indices.contains(&idx) {
-                        continue;
-                    }
-                    let dist = (idx as isize - self.current_index as isize).abs();
-                    if dist > max_dist {
-                        max_dist = dist;
-                        farthest_key = Some(k.clone());
-                    }
-                }
-            }
-
-            if let Some(k) = farthest_key {
-                if let Some(old_img) = self.cache.pop(&k) {
-                    self.current_bytes -= old_img.memory_size();
-                } else {
-                    break;
-                }
+            if let Some((_, old_img)) = self.cache.pop_lru() {
+                self.current_bytes -= old_img.memory_size();
             } else {
-                // すべてのキャッシュが表示中またはインデックス抽出不能な場合、
-                // LRUの最も古いものを破棄（ただし表示中は守る）
-                let mut key_to_pop = None;
-                for (k, _) in self.cache.iter().rev() {
-                    if let Some(idx) = Self::extract_index(k) {
-                        if self.protected_indices.contains(&idx) { continue; }
-                    }
-                    key_to_pop = Some(k.clone());
-                    break;
-                }
-
-                if let Some(k) = key_to_pop {
-                    if let Some(old_img) = self.cache.pop(&k) {
-                        self.current_bytes -= old_img.memory_size();
-                    } else { break; }
-                } else {
-                    // 削除できるものがない
-                    break;
-                }
+                break;
             }
         }
     }
@@ -144,6 +101,18 @@ impl ImageCache {
 
     pub fn get_keys(&self) -> Vec<String> {
         self.cache.iter().map(|(k, _)| k.clone()).collect()
+    }
+
+    pub fn set_max_bytes(&mut self, max_bytes: usize) {
+        self.max_bytes = max_bytes;
+        // サイズ変更後に溢れていたらトリミング
+        while self.current_bytes > self.max_bytes && self.cache.len() > 1 {
+            if let Some((_, old_img)) = self.cache.pop_lru() {
+                self.current_bytes -= old_img.memory_size();
+            } else {
+                break;
+            }
+        }
     }
 }
 

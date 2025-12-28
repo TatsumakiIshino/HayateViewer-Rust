@@ -1472,6 +1472,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     settings.max_history_count = count;
                     let _ = settings.save("config.json");
                 }
+                UserEvent::SetMaxCacheSize(size) => {
+                    settings.max_cache_size_mb = size;
+                    let _ = settings.save("config.json");
+                    // キャッシュインスタンスの最大サイズを更新
+                    let max_bytes = (size as usize) * 1024 * 1024;
+                    if let Ok(mut cache) = cpu_cache.lock() {
+                        // cache インスタンス自体を再初期化せずに max_bytes だけ変えられる仕組みが必要だが、
+                        // 現在の ImageCache には max_bytes の setter がないので reflection 的に作り直すか setter を追加する
+                        // setter を追加する方が綺麗。
+                        cache.set_max_bytes(max_bytes);
+                    }
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                }
+                UserEvent::SetCpuPrefetchPages(pages) => {
+                    settings.cpu_max_prefetch_pages = pages;
+                    let _ = settings.save("config.json");
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                    request_pages_with_prefetch(&app_state, &loader, &rt, &cpu_cache, &settings, &current_path_key);
+                }
+                UserEvent::SetGpuPrefetchPages(pages) => {
+                    settings.gpu_max_prefetch_pages = pages;
+                    let _ = settings.save("config.json");
+                    if let Some(ref mut ms) = modern_settings { ms.window.request_redraw(); }
+                    window.request_redraw();
+                }
             }
         },
             Event::AboutToWait => {
