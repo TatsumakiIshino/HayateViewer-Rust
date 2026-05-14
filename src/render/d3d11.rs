@@ -77,9 +77,9 @@ fn compile_shader(source: &[u8], entry_point: &str, target: &str) -> Result<ID3D
                 let slice = std::slice::from_raw_parts(ptr as *const u8, size);
                 let msg = String::from_utf8_lossy(slice);
                 let error_msg = format!("Shader compile error: {}\n{}", e, msg);
-                return Err(Error::new(E_FAIL, &error_msg));
+                return Err(windows::core::Error::new(e.code(), &error_msg));
             }
-            return Err(e.into());
+            return Err(e);
         }
 
         Ok(blob.unwrap())
@@ -164,7 +164,7 @@ impl Renderer for D3D11Renderer {
                     height: image.height,
                     _subsampling: *subsampling,
                     _precision: *precision,
-                    y_is_signed: *y_is_signed,
+                    _y_is_signed: *y_is_signed,
                     _c_is_signed: *c_is_signed,
                 })
             }
@@ -229,7 +229,7 @@ impl Renderer for D3D11Renderer {
                     cb,
                     cr,
                     _precision: precision,
-                    y_is_signed,
+                    _y_is_signed: _,
                     ..
                 } => {
                     self.context.PSSetShader(&self.pixel_shader_ycbcr, None);
@@ -351,7 +351,7 @@ impl D3D11Renderer {
             let swap_chain_desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: 0,
                 Height: 0,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 Stereo: false.into(),
                 SampleDesc: DXGI_SAMPLE_DESC {
                     Count: 1,
@@ -612,7 +612,7 @@ impl D3D11Renderer {
                 Height: height,
                 MipLevels: 1,
                 ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, // sRGB ガンマ補正を適用
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
                 SampleDesc: DXGI_SAMPLE_DESC {
                     Count: 1,
                     Quality: 0,

@@ -28,7 +28,7 @@ impl ArchiveLoader {
         let ext = path_buf.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
         
         let mut file_names = Vec::new();
-        let supported = ["jpg", "jpeg", "png", "webp", "bmp", "jp2"];
+        let supported = ["jpg", "jpeg", "png", "webp", "bmp", "jp2", "avif"];
 
         if ext == "zip" || ext == "cbz" {
             let file = std::fs::File::open(path)?;

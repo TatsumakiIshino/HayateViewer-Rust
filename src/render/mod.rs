@@ -56,7 +56,7 @@ pub enum TextureHandle {
         height: u32,
         _subsampling: (u8, u8),
         _precision: u8,
-        y_is_signed: bool,
+        _y_is_signed: bool,
         _c_is_signed: bool,
     },
     #[allow(dead_code)]
