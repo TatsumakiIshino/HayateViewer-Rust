@@ -81,10 +81,13 @@ impl AppState {
             return;
         }
 
-        let mut step = if self.is_spread_view { 2 } else { 1 };
+        let is_offset = self.snap_to_spread(self.current_page_index) != self.current_page_index;
 
+        let mut step = if self.is_spread_view { 2 } else { 1 };
+        step *= direction.abs() as usize;
+
+        let mut single_page_indices = std::collections::HashSet::new();
         if self.is_spread_view && self.spread_view_first_page_single {
-            let mut single_page_indices = std::collections::HashSet::new();
             single_page_indices.insert(0);
             for &idx in &self.folder_start_indices {
                 single_page_indices.insert(idx);
@@ -94,11 +97,11 @@ impl AppState {
                 if single_page_indices.contains(&self.current_page_index)
                     || single_page_indices.contains(&(self.current_page_index + 1))
                 {
-                    step = 1;
+                    step = 1 * direction.abs() as usize;
                 }
             } else {
                 if single_page_indices.contains(&(self.current_page_index.saturating_sub(1))) {
-                    step = 1;
+                    step = 1 * direction.abs() as usize;
                 }
             }
         }
@@ -109,7 +112,15 @@ impl AppState {
             self.current_page_index.saturating_sub(step)
         };
 
-        self.current_page_index = self.snap_to_spread(new_index);
+        let mut snapped = self.snap_to_spread(new_index);
+
+        if is_offset && self.is_spread_view {
+            if !single_page_indices.contains(&snapped) && snapped + 1 < total_pages && !single_page_indices.contains(&(snapped + 1)) {
+                snapped += 1;
+            }
+        }
+
+        self.current_page_index = snapped;
     }
 
     pub fn snap_to_spread(&self, index: usize) -> usize {

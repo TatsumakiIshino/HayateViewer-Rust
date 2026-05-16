@@ -23,15 +23,23 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Install dependencies via vcpkg
+        run: vcpkg install dav1d:x64-windows pkgconf:x64-windows
+
       - name: Build release binary
-        run: cargo build --release
+        shell: pwsh
+        run: |
+          $env:PKG_CONFIG = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\tools\pkgconf\pkgconf.exe"
+          $env:PKG_CONFIG_PATH = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\lib\pkgconfig"
+          cargo build --release
 
       - name: Prepare release assets
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}"
           $fileName = "HayateViewer-Rust-$version-windows-x64.zip"
-          Compress-Archive -Path "target/release/HayateViewer-Rust.exe", "README.md", "CHANGELOG.md" -DestinationPath $fileName
+          Copy-Item "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin\dav1d.dll" -Destination "target/release/"
+          Compress-Archive -Path "target/release/HayateViewer-Rust.exe", "target/release/dav1d.dll", "README.md", "CHANGELOG.md" -DestinationPath $fileName
           echo "ASSET_PATH=$fileName" >> $env:GITHUB_ENV
 
       - name: Extract release notes

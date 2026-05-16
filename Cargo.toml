@@ -1,11 +1,11 @@
 [package]
 name = "HayateViewer-Rust"
-version = "0.6.6-test"
+version = "0.6.7-test"
 edition = "2024"
 
 [dependencies]
 crc = "3.0.0"
-image = { version = "0.25.9", features = ["avif"] }
+image = { version = "0.25.9", features = ["avif", "avif-native"] }
 raw-window-handle = "0.5"
 rayon = "1.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
